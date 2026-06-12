@@ -12,6 +12,9 @@ numpy>=1.26.0
 pandas>=2.1.0
 scipy>=1.11.0           # Phase 20: HRP clustering (scipy.cluster.hierarchy)
 
+# ── Markov Regime Engine (original) ───────────────────────────────────────────
+hmmlearn>=0.3.0         # GaussianHMM
+
 # ── Market Data ───────────────────────────────────────────────────────────────
 yfinance>=0.2.36        # Phases 12,14,20,21: DXY/VIX/TLT/equity ETFs
 
