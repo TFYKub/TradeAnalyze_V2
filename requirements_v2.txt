@@ -5,44 +5,40 @@
 # Install:
 #   pip install -r requirements_v2.txt
 #
-# Python >= 3.10 required (dataclasses, match-case, type hints)
+# Python >= 3.10 required
 
 # ── Core Data & Numerics ──────────────────────────────────────────────────────
 numpy>=1.26.0
 pandas>=2.1.0
-scipy>=1.11.0           # Phase 20: HRP clustering (scipy.cluster.hierarchy)
+scipy>=1.11.0
 
 # ── Markov Regime Engine (original) ───────────────────────────────────────────
 hmmlearn>=0.3.0         # GaussianHMM
 
 # ── Market Data ───────────────────────────────────────────────────────────────
-yfinance>=0.2.36        # Phases 12,14,20,21: DXY/VIX/TLT/equity ETFs
+yfinance>=0.2.36
 
 # ── Machine Learning (Phase 17: Forecast Engine) ─────────────────────────────
-# Install at least one; XGBoost preferred, LightGBM as fallback
-xgboost>=2.0.0          # PRIMARY — ForecastEngine, Walk-forward regression
-lightgbm>=4.3.0         # FALLBACK — faster on large datasets
-
-# ── Options Pricing (Phases 19) ───────────────────────────────────────────────
-# scipy.stats.norm already required above (Black-Scholes: norm.pdf, norm.cdf)
+xgboost>=2.0.0          # PRIMARY
+lightgbm>=4.3.0         # FALLBACK
 
 # ── HTTP / API (Phase 13: OKX long/short ratio) ───────────────────────────────
-requests>=2.31.0        # already in original; used for OKX API calls
+requests>=2.31.0
 
-# ── Visualization (unchanged from original) ───────────────────────────────────
+# ── Visualization (unchanged) ─────────────────────────────────────────────────
 matplotlib>=3.8.0
 plotly>=5.18.0
 
-# ── Reporting / Sheets (unchanged) ────────────────────────────────────────────
+# ── Reporting / Sheets ────────────────────────────────────────────────────────
 gspread>=5.12.0
 google-auth>=2.28.0
 google-auth-oauthlib>=1.2.0
 
 # ── Messaging (unchanged) ────────────────────────────────────────────────────
-line-bot-sdk>=3.5.0     # LINE alert system
+line-bot-sdk>=3.5.0
 
 # ── ML / Stats utilities ──────────────────────────────────────────────────────
-scikit-learn>=1.4.0     # optional: StandardScaler, cross_val_score in ForecastEngine
+scikit-learn>=1.4.0
 
 # ── Dev / Testing ─────────────────────────────────────────────────────────────
 pytest>=7.4.0
@@ -50,8 +46,3 @@ pytest-cov>=4.1.0
 
 # ── Logging (unchanged) ───────────────────────────────────────────────────────
 python-dotenv>=1.0.0
-
-# ── Notes ─────────────────────────────────────────────────────────────────────
-# xgboost and lightgbm are both optional at runtime — ForecastEngine falls back
-# to a statistical baseline if neither is installed.
-# All other packages are hard requirements.
