@@ -144,3 +144,28 @@ def compute_liquidation_zones(
         cascade_risk       = cascade,
         interpretation     = interp,
     )
+
+# Add this function after compute_liquidation_zones
+
+def compute_liquidations(symbol: str, price: float) -> LiquidationResult:
+    """
+    Wrapper for compute_liquidation_zones that fetches market data and swing points.
+    Matches v2 orchestrator naming.
+    """
+    import yfinance as yf
+    from market_structure.swing_detector import detect_swings
+
+    try:
+        # Fetch daily data for the last 6 months to detect swings
+        df = yf.download(symbol, period="6mo", interval="1d", auto_adjust=True, progress=False)
+        if df is None or df.empty or len(df) < 30:
+            # Fallback: use empty swing lists
+            return compute_liquidation_zones(symbol, price, [], [])
+        # Detect swings
+        highs, lows = detect_swings(df, window=5)
+        swing_highs = [s.price for s in highs]
+        swing_lows  = [s.price for s in lows]
+        return compute_liquidation_zones(symbol, price, swing_highs, swing_lows)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("compute_liquidations fallback: %s", exc)
+        return compute_liquidation_zones(symbol, price, [], [])

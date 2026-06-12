@@ -33,7 +33,7 @@ from reports.sheet_writer_v2 import write_all_institutional   # NEW
 from utils.symbol_loader import load_symbols_with_type
 
 # Flag to control v2 LINE alerts – set to False during dry run
-V2_SEND_ALERTS = False   # Change to True after validation
+V2_SEND_ALERTS = True   # Change to True after validation
 
 def _build_trade_signal_dict(symbol, futures, asset_type):
     """Build signal dict for TradeSignals sheet."""

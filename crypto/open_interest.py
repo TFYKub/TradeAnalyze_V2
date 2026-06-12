@@ -143,3 +143,11 @@ def fetch_open_interest(
         signal_strength = strength,
         interpretation  = interp,
     )
+
+# Add this function at the end of the file (after fetch_open_interest)
+
+def compute_open_interest(symbol: str, price_change: float = 0.0) -> OpenInterestResult:
+    """
+    Wrapper for fetch_open_interest to match v2 orchestrator naming.
+    """
+    return fetch_open_interest(symbol, price_change)

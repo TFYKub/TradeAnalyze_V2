@@ -1,0 +1,391 @@
+2026-06-12 18:20:14,046 | INFO | TradeAnalyze | Downloading BTC-USD
+2026-06-12 18:20:14,791 | INFO | TradeAnalyze | BTC-USD: 731 rows loaded
+2026-06-12 18:20:14,866 | INFO | core.futures_orchestrator | [BTC-USD] start price=63659.3906 bars=731
+2026-06-12 18:20:15,261 | INFO | engines.regime_ensemble | [ensemble] regime=STRONG_BEAR conf=54.7% clarity=26.4  markov=STRONG_BEAR trend=STRONG_BEAR vol=BEAR macro=BEAR
+2026-06-12 18:20:15,265 | INFO | engines.volatility_regime | [vol_regime] PANIC_VOL score=82 hv20=39.3% hv5=32.6% atr=3.73% vov=0.130
+2026-06-12 18:20:15,272 | INFO | market_structure.structure_consistency | [structure_consistency] MODERATE penalty=25 conf=50  ['Bullish structure but EMA Bearish — structure lagging EMA', 'Bear regime but Bullish structure — watch for reversal']
+2026-06-12 18:20:15,284 | INFO | engines.trade_quality | [trade_quality] C score=53.7  scores={'regime': 42.2, 'trend': 100.0, 'structure': 75.0, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 10.0}
+2026-06-12 18:20:15,307 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=46.8%  P(SL)=86.5%  P(TP)=60.4%  E[ret]=-0.23%  VaR95=17.06%
+2026-06-12 18:20:15,309 | WARNING | risk.consistency_checker | [consistency] 2 errors: ['P(target)=60.4% > P(profit)=46.8% — impossible: target hit ⊂ profit, so P(target) must be ≤ P(profit)', 'RR=0.0 < 1 and POP=46.8% < 50 → negative EV trade, must reject']
+2026-06-12 18:20:15,310 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=46.8% + P(stop)=86.5% = 133.3% > 100% — check simulation logic']
+2026-06-12 18:20:15,316 | INFO | engines.volume_profile | [vol_profile] POC=77345.05 VA=[73555.73-81608.05] bias=BEARISH HVN=14 LVN=21
+2026-06-12 18:20:15,321 | INFO | engines.anchored_vwap | [avwap] monthly=64036.18 quarterly=73530.99 yearly=75036.34 trend=BEARISH above=1
+2026-06-12 18:20:15,321 | INFO | core.futures_orchestrator | [BTC-USD] done 0.5s | STRONG_BEAR conf=42% | NO_TRADE AI=59 grade=C RR=0.00 | approved=False
+2026-06-12 18:20:17,035 | INFO | reports.sheet_writer | [sheet_writer] TradeSignals ← BTC-USD
+2026-06-12 18:20:17,321 | INFO | alerts.line_alert | LINE message sent successfully
+2026-06-12 18:20:17,367 | INFO | core.futures_orchestrator_v2 | [BTC-USD] v2 start price=63659.3906 bars=731
+2026-06-12 18:20:17,849 | INFO | engines.liquidity_regime | [liquidity] regime=RISK_ON conf=58.0 score=61.1 mult=0.90 VIX=18.3 DXY=STABLE Yield=STABLE source=live
+2026-06-12 18:20:18,934 | INFO | engines.market_breadth | [breadth] regime=BULL score=64.1 conf=56.7 crypto=35.1 equity=83.4 quality=FULL
+2026-06-12 18:20:19,740 | INFO | engines.cross_asset_engine | [cross_asset] TRANSITION conf=55.0 RS=42.9 btc_20d=-17.3% beta_spy=1.29 decouple=False dominant=QQQ
+2026-06-12 18:20:19,749 | INFO | engines.regime_ensemble_v2 | [ensemble_v2] regime=STRONG_BEAR conf=44.3% clarity=11.6 perm=NO_TRADE size=0.50 new_signals=True
+2026-06-12 18:20:19,750 | INFO | engines.regime_persistence | [persistence] STRONG_BEAR p_self=0.900 E=10.0d half_life=6.6d exit_7d=52% exit_14d=77% score=74 label=MATURING next=BULL
+2026-06-12 18:20:19,756 | INFO | engines.volatility_regime | [vol_regime] PANIC_VOL score=82 hv20=39.3% hv5=32.6% atr=3.73% vov=0.130
+2026-06-12 18:20:19,766 | INFO | market_structure.structure_consistency | [structure_consistency] MODERATE penalty=25 conf=50  ['Bullish structure but EMA Bearish — structure lagging EMA', 'Bear regime but Bullish structure — watch for reversal']
+2026-06-12 18:20:19,787 | INFO | engines.trade_quality | [trade_quality] C score=51.6  scores={'regime': 31.8, 'trend': 100.0, 'structure': 75.0, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 10.0}
+2026-06-12 18:20:19,799 | ERROR | TradeAnalyze | [BTC-USD] UNHANDLED:
+Traceback (most recent call last):
+  File "/workspaces/TradeAnalyze_V2/main.py", line 136, in run_trading_engine
+    futures_v2 = futures_orch_v2.run(symbol, df)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/TradeAnalyze_V2/core/futures_orchestrator_v2.py", line 333, in run
+    from crypto.funding_rate import compute_funding_rate
+ImportError: cannot import name 'compute_funding_rate' from 'crypto.funding_rate' (/workspaces/TradeAnalyze_V2/crypto/funding_rate.py)
+
+2026-06-12 18:20:19,801 | INFO | TradeAnalyze | Downloading SPY
+2026-06-12 18:20:19,929 | INFO | TradeAnalyze | SPY: 502 rows loaded
+2026-06-12 18:20:19,930 | INFO | core.futures_orchestrator | [SPY] start price=740.6200 bars=502
+2026-06-12 18:20:19,979 | WARNING | hmmlearn.base | Model is not converging.  Current: 4413.571533214252 is not greater than 4414.2961582922. Delta is -0.7246250779480761
+2026-06-12 18:20:19,985 | INFO | engines.regime_ensemble | [ensemble] regime=RANGE conf=54.1% clarity=25.9  markov=BEAR trend=RANGE vol=RANGE macro=RANGE
+2026-06-12 18:20:19,990 | INFO | engines.volatility_regime | [vol_regime] NORMAL_VOL score=34 hv20=15.1% hv5=18.8% atr=1.29% vov=0.086
+2026-06-12 18:20:19,996 | INFO | market_structure.structure_consistency | [structure_consistency] MODERATE penalty=10 conf=65  ['Bullish structure with Bearish RSI divergence — caution']
+2026-06-12 18:20:20,004 | INFO | engines.trade_quality | [trade_quality] REJECT score=41.4  scores={'regime': 24.6, 'trend': 15.0, 'structure': 82.5, 'ev': 65.0, 'rr': 0.0, 'volume': 30.0, 'volatility': 100.0}
+2026-06-12 18:20:20,024 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=59.9%  P(SL)=91.1%  P(TP)=42.8%  E[ret]=1.34%  VaR95=6.32%
+2026-06-12 18:20:20,027 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=59.9% + P(stop)=91.1% = 151.0% > 100% — check simulation logic']
+2026-06-12 18:20:20,035 | INFO | engines.volume_profile | [vol_profile] POC=656.82 VA=[630.59-732.86] bias=BULLISH HVN=11 LVN=11
+2026-06-12 18:20:20,038 | INFO | engines.anchored_vwap | [avwap] monthly=742.82 quarterly=717.94 yearly=690.11 trend=MIXED above=2
+2026-06-12 18:20:20,038 | INFO | core.futures_orchestrator | [SPY] done 0.1s | RANGE conf=49% | NO_TRADE AI=38 grade=REJECT RR=0.00 | approved=False
+2026-06-12 18:20:21,529 | INFO | reports.sheet_writer | [sheet_writer] TradeSignals ← SPY
+2026-06-12 18:20:21,717 | INFO | alerts.line_alert | LINE message sent successfully
+2026-06-12 18:20:21,718 | INFO | core.futures_orchestrator_v2 | [SPY] v2 start price=740.6200 bars=502
+2026-06-12 18:20:21,760 | WARNING | hmmlearn.base | Model is not converging.  Current: 4413.571533214252 is not greater than 4414.2961582922. Delta is -0.7246250779480761
+2026-06-12 18:20:21,988 | INFO | engines.liquidity_regime | [liquidity] regime=RISK_ON conf=58.0 score=61.1 mult=0.90 VIX=18.3 DXY=STABLE Yield=STABLE source=live
+2026-06-12 18:20:22,709 | INFO | engines.market_breadth | [breadth] regime=BULL score=64.1 conf=56.7 crypto=35.1 equity=83.4 quality=FULL
+2026-06-12 18:20:23,210 | INFO | engines.cross_asset_engine | [cross_asset] TRANSITION conf=55.0 RS=50.5 btc_20d=+0.2% beta_spy=1.00 decouple=False dominant=SPY
+2026-06-12 18:20:23,215 | INFO | engines.regime_ensemble_v2 | [ensemble_v2] regime=RANGE conf=48.0% clarity=19.1 perm=NO_TRADE size=0.50 new_signals=True
+2026-06-12 18:20:23,215 | INFO | engines.regime_persistence | [persistence] RANGE p_self=0.010 E=1.0d half_life=0.5d exit_7d=100% exit_14d=100% score=0 label=EXHAUSTED next=BEAR
+2026-06-12 18:20:23,219 | INFO | engines.volatility_regime | [vol_regime] NORMAL_VOL score=34 hv20=15.1% hv5=18.8% atr=1.29% vov=0.086
+2026-06-12 18:20:23,224 | INFO | market_structure.structure_consistency | [structure_consistency] MODERATE penalty=10 conf=65  ['Bullish structure with Bearish RSI divergence — caution']
+2026-06-12 18:20:23,230 | INFO | engines.trade_quality | [trade_quality] REJECT score=40.8  scores={'regime': 21.5, 'trend': 15.0, 'structure': 82.5, 'ev': 65.0, 'rr': 0.0, 'volume': 30.0, 'volatility': 100.0}
+2026-06-12 18:20:23,231 | ERROR | TradeAnalyze | [SPY] UNHANDLED:
+Traceback (most recent call last):
+  File "/workspaces/TradeAnalyze_V2/main.py", line 136, in run_trading_engine
+    futures_v2 = futures_orch_v2.run(symbol, df)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/TradeAnalyze_V2/core/futures_orchestrator_v2.py", line 333, in run
+    from crypto.funding_rate import compute_funding_rate
+ImportError: cannot import name 'compute_funding_rate' from 'crypto.funding_rate' (/workspaces/TradeAnalyze_V2/crypto/funding_rate.py)
+
+2026-06-12 18:20:23,232 | INFO | TradeAnalyze | Downloading QQQ
+2026-06-12 18:20:23,338 | INFO | TradeAnalyze | QQQ: 502 rows loaded
+2026-06-12 18:20:23,339 | INFO | core.futures_orchestrator | [QQQ] start price=720.5700 bars=502
+2026-06-12 18:20:23,395 | WARNING | hmmlearn.base | Model is not converging.  Current: 4127.032130743359 is not greater than 4127.2016224214385. Delta is -0.16949167807979393
+2026-06-12 18:20:23,400 | INFO | engines.regime_ensemble | [ensemble] regime=RANGE conf=44.2% clarity=12.5  markov=RANGE trend=STRONG_BULL vol=RANGE macro=RANGE
+2026-06-12 18:20:23,405 | INFO | engines.volatility_regime | [vol_regime] NORMAL_VOL score=52 hv20=26.7% hv5=33.8% atr=2.10% vov=0.093
+2026-06-12 18:20:23,416 | INFO | engines.trade_quality | [trade_quality] REJECT score=46.9  scores={'regime': 22.1, 'trend': 34.9, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 100.0}
+2026-06-12 18:20:23,436 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=59.4%  P(SL)=91.0%  P(TP)=52.7%  E[ret]=1.71%  VaR95=8.15%
+2026-06-12 18:20:23,438 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=59.4% + P(stop)=91.0% = 150.4% > 100% — check simulation logic']
+2026-06-12 18:20:23,446 | INFO | engines.volume_profile | [vol_profile] POC=588.42 VA=[557.53-704.25] bias=BULLISH HVN=9 LVN=14
+2026-06-12 18:20:23,449 | INFO | engines.anchored_vwap | [avwap] monthly=718.43 quarterly=677.35 yearly=630.95 trend=BULLISH above=4
+2026-06-12 18:20:23,449 | INFO | core.futures_orchestrator | [QQQ] done 0.1s | RANGE conf=44% | NO_TRADE AI=43 grade=REJECT RR=0.00 | approved=False
+2026-06-12 18:20:25,030 | INFO | reports.sheet_writer | [sheet_writer] TradeSignals ← QQQ
+2026-06-12 18:20:25,327 | INFO | alerts.line_alert | LINE message sent successfully
+2026-06-12 18:20:25,330 | INFO | core.futures_orchestrator_v2 | [QQQ] v2 start price=720.5700 bars=502
+2026-06-12 18:20:25,402 | WARNING | hmmlearn.base | Model is not converging.  Current: 4127.032130743359 is not greater than 4127.2016224214385. Delta is -0.16949167807979393
+2026-06-12 18:20:26,665 | INFO | engines.liquidity_regime | [liquidity] regime=RISK_ON conf=58.0 score=61.1 mult=0.90 VIX=18.3 DXY=STABLE Yield=STABLE source=live
+2026-06-12 18:20:27,427 | INFO | engines.market_breadth | [breadth] regime=BULL score=64.1 conf=56.7 crypto=35.1 equity=83.4 quality=FULL
+2026-06-12 18:20:28,962 | INFO | engines.cross_asset_engine | [cross_asset] TRANSITION conf=55.0 RS=51.2 btc_20d=+1.6% beta_spy=1.65 decouple=False dominant=QQQ
+2026-06-12 18:20:28,966 | INFO | engines.regime_ensemble_v2 | [ensemble_v2] regime=RANGE conf=40.1% clarity=11.7 perm=NO_TRADE size=0.50 new_signals=True
+2026-06-12 18:20:28,966 | INFO | engines.regime_persistence | [persistence] RANGE p_self=0.914 E=11.6d half_life=7.7d exit_7d=47% exit_14d=72% score=77 label=MATURING next=BULL
+2026-06-12 18:20:28,971 | INFO | engines.volatility_regime | [vol_regime] NORMAL_VOL score=52 hv20=26.7% hv5=33.8% atr=2.10% vov=0.093
+2026-06-12 18:20:28,984 | INFO | engines.trade_quality | [trade_quality] REJECT score=46.5  scores={'regime': 20.1, 'trend': 34.9, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 100.0}
+2026-06-12 18:20:28,984 | ERROR | TradeAnalyze | [QQQ] UNHANDLED:
+Traceback (most recent call last):
+  File "/workspaces/TradeAnalyze_V2/main.py", line 136, in run_trading_engine
+    futures_v2 = futures_orch_v2.run(symbol, df)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/TradeAnalyze_V2/core/futures_orchestrator_v2.py", line 333, in run
+    from crypto.funding_rate import compute_funding_rate
+ImportError: cannot import name 'compute_funding_rate' from 'crypto.funding_rate' (/workspaces/TradeAnalyze_V2/crypto/funding_rate.py)
+
+2026-06-12 18:20:28,985 | INFO | TradeAnalyze | Downloading GC=F
+2026-06-12 18:20:29,069 | INFO | TradeAnalyze | GC=F: 504 rows loaded
+2026-06-12 18:20:29,070 | INFO | core.futures_orchestrator | [GC=F] start price=4241.2998 bars=504
+2026-06-12 18:20:29,129 | INFO | engines.regime_ensemble | [ensemble] regime=BEAR conf=59.8% clarity=26.0  markov=BEAR trend=BEAR vol=RANGE macro=BEAR
+2026-06-12 18:20:29,133 | INFO | engines.volatility_regime | [vol_regime] HIGH_VOL score=56 hv20=26.7% hv5=42.5% atr=2.36% vov=0.105
+2026-06-12 18:20:29,147 | INFO | engines.trade_quality | [trade_quality] C score=61.1  scores={'regime': 47.8, 'trend': 78.6, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 100.0, 'volatility': 50.0}
+2026-06-12 18:20:29,166 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=62.2%  P(SL)=91.8%  P(TP)=58.1%  E[ret]=2.38%  VaR95=8.35%
+2026-06-12 18:20:29,168 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=62.2% + P(stop)=91.8% = 154.0% > 100% — check simulation logic']
+2026-06-12 18:20:29,174 | INFO | engines.volume_profile | [vol_profile] POC=4446.86 VA=[4243.18-4871.21] bias=BEARISH HVN=6 LVN=36
+2026-06-12 18:20:29,178 | INFO | engines.anchored_vwap | [avwap] monthly=4245.55 quarterly=4360.23 yearly=4679.15 trend=BEARISH above=0
+2026-06-12 18:20:29,178 | INFO | core.futures_orchestrator | [GC=F] done 0.1s | BEAR conf=60% | NO_TRADE AI=62 grade=C RR=0.00 | approved=False
+2026-06-12 18:20:30,760 | INFO | reports.sheet_writer | [sheet_writer] TradeSignals ← GC=F
+2026-06-12 18:20:30,961 | INFO | alerts.line_alert | LINE message sent successfully
+2026-06-12 18:20:30,967 | INFO | core.futures_orchestrator_v2 | [GC=F] v2 start price=4241.2998 bars=504
+2026-06-12 18:20:32,378 | INFO | engines.liquidity_regime | [liquidity] regime=RISK_ON conf=58.0 score=61.1 mult=0.90 VIX=18.3 DXY=STABLE Yield=STABLE source=live
+2026-06-12 18:20:34,263 | INFO | engines.market_breadth | [breadth] regime=BULL score=64.1 conf=56.7 crypto=35.1 equity=83.4 quality=FULL
+2026-06-12 18:20:36,049 | INFO | engines.cross_asset_engine | [cross_asset] TRANSITION conf=55.0 RS=46.4 btc_20d=-6.9% beta_spy=1.28 decouple=False dominant=GLD
+2026-06-12 18:20:36,053 | INFO | engines.regime_ensemble_v2 | [ensemble_v2] regime=BEAR conf=49.0% clarity=14.9 perm=NO_TRADE size=0.50 new_signals=True
+2026-06-12 18:20:36,053 | INFO | engines.regime_persistence | [persistence] BEAR p_self=0.940 E=16.6d half_life=11.2d exit_7d=35% exit_14d=58% score=83 label=ESTABLISHED next=STRONG_BEAR
+2026-06-12 18:20:36,058 | INFO | engines.volatility_regime | [vol_regime] HIGH_VOL score=56 hv20=26.7% hv5=42.5% atr=2.36% vov=0.105
+2026-06-12 18:20:36,069 | INFO | engines.trade_quality | [trade_quality] C score=59.4  scores={'regime': 39.2, 'trend': 78.6, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 100.0, 'volatility': 50.0}
+2026-06-12 18:20:36,070 | ERROR | TradeAnalyze | [GC=F] UNHANDLED:
+Traceback (most recent call last):
+  File "/workspaces/TradeAnalyze_V2/main.py", line 136, in run_trading_engine
+    futures_v2 = futures_orch_v2.run(symbol, df)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/TradeAnalyze_V2/core/futures_orchestrator_v2.py", line 333, in run
+    from crypto.funding_rate import compute_funding_rate
+ImportError: cannot import name 'compute_funding_rate' from 'crypto.funding_rate' (/workspaces/TradeAnalyze_V2/crypto/funding_rate.py)
+
+2026-06-12 18:20:36,071 | INFO | TradeAnalyze | Downloading CL=F
+2026-06-12 18:20:36,158 | INFO | TradeAnalyze | CL=F: 504 rows loaded
+2026-06-12 18:20:36,159 | INFO | core.futures_orchestrator | [CL=F] start price=84.7900 bars=504
+2026-06-12 18:20:36,220 | WARNING | hmmlearn.base | Model is not converging.  Current: 3563.0272667520635 is not greater than 3563.0313903816805. Delta is -0.004123629616969993
+2026-06-12 18:20:36,228 | INFO | engines.regime_ensemble | [ensemble] regime=STRONG_BEAR conf=48.4% clarity=28.2  markov=STRONG_BEAR trend=BEAR vol=STRONG_BEAR macro=BEAR
+2026-06-12 18:20:36,233 | INFO | engines.volatility_regime | [vol_regime] PANIC_VOL score=100 hv20=55.7% hv5=40.9% atr=6.64% vov=0.206
+2026-06-12 18:20:36,247 | INFO | engines.trade_quality | [trade_quality] C score=55.4  scores={'regime': 48.4, 'trend': 86.5, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 10.0}
+2026-06-12 18:20:36,271 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=48.3%  P(SL)=87.1%  P(TP)=64.5%  E[ret]=0.26%  VaR95=18.53%
+2026-06-12 18:20:36,273 | WARNING | risk.consistency_checker | [consistency] 2 errors: ['P(target)=64.5% > P(profit)=48.3% — impossible: target hit ⊂ profit, so P(target) must be ≤ P(profit)', 'RR=0.0 < 1 and POP=48.3% < 50 → negative EV trade, must reject']
+2026-06-12 18:20:36,273 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=48.3% + P(stop)=87.1% = 135.4% > 100% — check simulation logic']
+2026-06-12 18:20:36,280 | INFO | engines.volume_profile | [vol_profile] POC=91.31 VA=[89.83-102.43] bias=BEARISH HVN=20 LVN=22
+2026-06-12 18:20:36,283 | INFO | engines.anchored_vwap | [avwap] monthly=91.03 quarterly=96.93 yearly=82.96 trend=BEARISH above=1
+2026-06-12 18:20:36,284 | INFO | core.futures_orchestrator | [CL=F] done 0.1s | STRONG_BEAR conf=48% | NO_TRADE AI=64 grade=C RR=0.00 | approved=False
+2026-06-12 18:20:37,753 | INFO | reports.sheet_writer | [sheet_writer] TradeSignals ← CL=F
+2026-06-12 18:20:37,937 | INFO | alerts.line_alert | LINE message sent successfully
+2026-06-12 18:20:37,938 | INFO | core.futures_orchestrator_v2 | [CL=F] v2 start price=84.7900 bars=504
+2026-06-12 18:20:37,996 | WARNING | hmmlearn.base | Model is not converging.  Current: 3563.0272667520635 is not greater than 3563.0313903816805. Delta is -0.004123629616969993
+2026-06-12 18:20:38,149 | INFO | engines.liquidity_regime | [liquidity] regime=RISK_ON conf=58.0 score=61.1 mult=0.90 VIX=18.3 DXY=STABLE Yield=STABLE source=live
+2026-06-12 18:20:38,890 | INFO | engines.market_breadth | [breadth] regime=BULL score=64.1 conf=56.7 crypto=35.1 equity=83.4 quality=FULL
+2026-06-12 18:20:40,439 | INFO | engines.cross_asset_engine | [cross_asset] TRANSITION conf=40.0 RS=45.0 btc_20d=-19.6% beta_spy=-1.48 decouple=True dominant=TLT
+2026-06-12 18:20:40,443 | INFO | engines.regime_ensemble_v2 | [ensemble_v2] regime=STRONG_BEAR conf=39.2% clarity=12.0 perm=NO_TRADE size=0.50 new_signals=True
+2026-06-12 18:20:40,443 | INFO | engines.regime_persistence | [persistence] STRONG_BEAR p_self=0.971 E=34.2d half_life=23.4d exit_7d=19% exit_14d=34% score=92 label=ESTABLISHED next=RANGE
+2026-06-12 18:20:40,448 | INFO | engines.volatility_regime | [vol_regime] PANIC_VOL score=100 hv20=55.7% hv5=40.9% atr=6.64% vov=0.206
+2026-06-12 18:20:40,459 | INFO | engines.trade_quality | [trade_quality] C score=53.6  scores={'regime': 39.2, 'trend': 86.5, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 10.0}
+2026-06-12 18:20:40,460 | ERROR | TradeAnalyze | [CL=F] UNHANDLED:
+Traceback (most recent call last):
+  File "/workspaces/TradeAnalyze_V2/main.py", line 136, in run_trading_engine
+    futures_v2 = futures_orch_v2.run(symbol, df)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/TradeAnalyze_V2/core/futures_orchestrator_v2.py", line 333, in run
+    from crypto.funding_rate import compute_funding_rate
+ImportError: cannot import name 'compute_funding_rate' from 'crypto.funding_rate' (/workspaces/TradeAnalyze_V2/crypto/funding_rate.py)
+
+2026-06-12 18:20:40,461 | INFO | TradeAnalyze | Engine done — success=0 fail=5
+2026-06-12 18:23:34,048 | INFO | TradeAnalyze | Downloading BTC-USD
+2026-06-12 18:23:34,377 | INFO | TradeAnalyze | BTC-USD: 731 rows loaded
+2026-06-12 18:23:34,411 | INFO | core.futures_orchestrator | [BTC-USD] start price=63666.0117 bars=731
+2026-06-12 18:23:34,741 | INFO | engines.regime_ensemble | [ensemble] regime=STRONG_BEAR conf=54.7% clarity=26.4  markov=STRONG_BEAR trend=STRONG_BEAR vol=BEAR macro=BEAR
+2026-06-12 18:23:34,746 | INFO | engines.volatility_regime | [vol_regime] PANIC_VOL score=82 hv20=39.3% hv5=32.6% atr=3.73% vov=0.130
+2026-06-12 18:23:34,757 | INFO | market_structure.structure_consistency | [structure_consistency] MODERATE penalty=25 conf=50  ['Bullish structure but EMA Bearish — structure lagging EMA', 'Bear regime but Bullish structure — watch for reversal']
+2026-06-12 18:23:34,777 | INFO | engines.trade_quality | [trade_quality] C score=53.7  scores={'regime': 42.2, 'trend': 100.0, 'structure': 75.0, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 10.0}
+2026-06-12 18:23:34,805 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=46.8%  P(SL)=86.5%  P(TP)=60.4%  E[ret]=-0.23%  VaR95=17.06%
+2026-06-12 18:23:34,808 | WARNING | risk.consistency_checker | [consistency] 2 errors: ['P(target)=60.4% > P(profit)=46.8% — impossible: target hit ⊂ profit, so P(target) must be ≤ P(profit)', 'RR=0.0 < 1 and POP=46.8% < 50 → negative EV trade, must reject']
+2026-06-12 18:23:34,808 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=46.8% + P(stop)=86.5% = 133.3% > 100% — check simulation logic']
+2026-06-12 18:23:34,818 | INFO | engines.volume_profile | [vol_profile] POC=77345.05 VA=[73555.73-81608.05] bias=BEARISH HVN=14 LVN=21
+2026-06-12 18:23:34,823 | INFO | engines.anchored_vwap | [avwap] monthly=64036.36 quarterly=73531.26 yearly=75036.45 trend=BEARISH above=1
+2026-06-12 18:23:34,823 | INFO | core.futures_orchestrator | [BTC-USD] done 0.4s | STRONG_BEAR conf=42% | NO_TRADE AI=59 grade=C RR=0.00 | approved=False
+2026-06-12 18:23:36,357 | INFO | reports.sheet_writer | [sheet_writer] TradeSignals ← BTC-USD
+2026-06-12 18:23:36,723 | INFO | alerts.line_alert | LINE message sent successfully
+2026-06-12 18:23:36,794 | INFO | core.futures_orchestrator_v2 | [BTC-USD] v2 start price=63666.0117 bars=731
+2026-06-12 18:23:37,216 | INFO | engines.liquidity_regime | [liquidity] regime=RISK_ON conf=58.0 score=61.1 mult=0.90 VIX=18.3 DXY=STABLE Yield=STABLE source=live
+2026-06-12 18:23:37,896 | INFO | engines.market_breadth | [breadth] regime=BULL score=64.1 conf=56.7 crypto=35.1 equity=83.4 quality=FULL
+2026-06-12 18:23:38,386 | INFO | engines.cross_asset_engine | [cross_asset] TRANSITION conf=55.0 RS=42.9 btc_20d=-17.3% beta_spy=1.29 decouple=False dominant=QQQ
+2026-06-12 18:23:38,398 | INFO | engines.regime_ensemble_v2 | [ensemble_v2] regime=STRONG_BEAR conf=44.3% clarity=11.6 perm=NO_TRADE size=0.50 new_signals=True
+2026-06-12 18:23:38,400 | INFO | engines.regime_persistence | [persistence] STRONG_BEAR p_self=0.900 E=10.0d half_life=6.6d exit_7d=52% exit_14d=77% score=74 label=MATURING next=BULL
+2026-06-12 18:23:38,412 | INFO | engines.volatility_regime | [vol_regime] PANIC_VOL score=82 hv20=39.3% hv5=32.6% atr=3.73% vov=0.130
+2026-06-12 18:23:38,427 | INFO | market_structure.structure_consistency | [structure_consistency] MODERATE penalty=25 conf=50  ['Bullish structure but EMA Bearish — structure lagging EMA', 'Bear regime but Bullish structure — watch for reversal']
+2026-06-12 18:23:38,454 | INFO | engines.trade_quality | [trade_quality] C score=51.6  scores={'regime': 31.8, 'trend': 100.0, 'structure': 75.0, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 10.0}
+2026-06-12 18:23:38,848 | INFO | crypto.funding_rate | [funding] BTC-USD rate=+0.00000 regime=NEUTRAL source=deribit
+2026-06-12 18:23:39,055 | INFO | crypto.open_interest | [oi] BTC-USD oi=1001743370 trend=STABLE signal=UNKNOWN source=deribit
+2026-06-12 18:23:39,100 | WARNING | crypto.liquidation_engine | compute_liquidations fallback: only 0-dimensional arrays can be converted to Python scalars
+2026-06-12 18:23:39,101 | INFO | crypto.liquidation_engine | [liq_engine] BTC-USD cascade=LOW nearest_long=63093.02 nearest_short=64239.01
+2026-06-12 18:23:39,230 | INFO | crypto.flow_engine | [flow_engine] BTC-USD regime=NEUTRAL dir=NEUTRAL score=50.5 conf=54.2 funding=NEUTRAL oi=UNKNOWN L/S=1.00 cascade=LOW
+2026-06-12 18:23:39,913 | INFO | engines.forecast_engine | [forecast] [xgboost] NEUTRAL — 5d=-4.2% (P↑=49%) | 10d=-4.0% (P↑=49%) | 20d=-4.2% (P↑=47%) | conf=40%
+2026-06-12 18:23:39,913 | INFO | core.futures_orchestrator_v2 | [BTC-USD] Conviction gate: score=0.0 < 50 → direction=WAIT
+2026-06-12 18:23:39,943 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=46.8%  P(SL)=86.5%  P(TP)=60.4%  E[ret]=-0.23%  VaR95=17.06%
+2026-06-12 18:23:39,946 | WARNING | risk.consistency_checker | [consistency] 2 errors: ['P(target)=60.4% > P(profit)=46.8% — impossible: target hit ⊂ profit, so P(target) must be ≤ P(profit)', 'RR=0.0 < 1 and POP=46.8% < 50 → negative EV trade, must reject']
+2026-06-12 18:23:39,946 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=46.8% + P(stop)=86.5% = 133.3% > 100% — check simulation logic']
+2026-06-12 18:23:39,959 | INFO | engines.volume_profile | [vol_profile] POC=77345.05 VA=[73555.73-81608.05] bias=BEARISH HVN=14 LVN=21
+2026-06-12 18:23:39,965 | INFO | engines.anchored_vwap | [avwap] monthly=64036.36 quarterly=73531.26 yearly=75036.45 trend=BEARISH above=1
+2026-06-12 18:23:39,966 | INFO | core.futures_orchestrator_v2 | [BTC-USD] v2 done 3.2s | STRONG_BEAR conf=32% | NO_TRADE AI=56 grade=C conviction=0(NO TRADE) RR=0.00 liq=RISK_ON flow=NEUTRAL approved=False
+2026-06-12 18:23:42,210 | INFO | reports.sheet_writer_v2 | [sheet_v2] InstitutionalSignals ← BTC-USD
+2026-06-12 18:23:44,292 | INFO | reports.sheet_writer_v2 | [sheet_v2] RegimeDashboard ← BTC-USD
+2026-06-12 18:23:44,520 | INFO | data.option_chain | [yfinance] BTC-USD: 0 option rows fetched
+2026-06-12 18:23:44,664 | INFO | options.selection_engine | [selection] BTC-USD: regime=STRONG_BEAR iv_rank=43 rule=COMPOSITE_RANK n=4
+2026-06-12 18:23:44,665 | INFO | options.selection_engine | [selection] BTC-USD: top=LONG_PUT score=79.7 pop=53% ev=32983.76
+2026-06-12 18:23:44,665 | INFO | options.options_orchestrator | [BTC-USD] options done 0.0s | LONG_PUT score=80 pop=53% ev=32983.8 | approved=False
+2026-06-12 18:23:45,363 | ERROR | reports.options_sheet_writer | Options_Analysis write failed (BTC-USD): Options_Analysis
+2026-06-12 18:23:45,363 | ERROR | TradeAnalyze | [BTC-USD] Options analysis: Options_Analysis
+2026-06-12 18:23:46,865 | INFO | TradeAnalyze | Downloading SPY
+2026-06-12 18:23:47,023 | INFO | TradeAnalyze | SPY: 502 rows loaded
+2026-06-12 18:23:47,024 | INFO | core.futures_orchestrator | [SPY] start price=740.6800 bars=502
+2026-06-12 18:23:47,101 | WARNING | hmmlearn.base | Model is not converging.  Current: 4413.566808814248 is not greater than 4414.291134811409. Delta is -0.7243259971610314
+2026-06-12 18:23:47,112 | INFO | engines.regime_ensemble | [ensemble] regime=RANGE conf=54.1% clarity=25.9  markov=BEAR trend=RANGE vol=RANGE macro=RANGE
+2026-06-12 18:23:47,119 | INFO | engines.volatility_regime | [vol_regime] NORMAL_VOL score=34 hv20=15.1% hv5=18.8% atr=1.29% vov=0.086
+2026-06-12 18:23:47,127 | INFO | market_structure.structure_consistency | [structure_consistency] MODERATE penalty=10 conf=65  ['Bullish structure with Bearish RSI divergence — caution']
+2026-06-12 18:23:47,139 | INFO | engines.trade_quality | [trade_quality] REJECT score=41.4  scores={'regime': 24.6, 'trend': 15.1, 'structure': 82.5, 'ev': 65.0, 'rr': 0.0, 'volume': 30.0, 'volatility': 100.0}
+2026-06-12 18:23:47,162 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=59.9%  P(SL)=91.1%  P(TP)=42.8%  E[ret]=1.34%  VaR95=6.32%
+2026-06-12 18:23:47,164 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=59.9% + P(stop)=91.1% = 151.0% > 100% — check simulation logic']
+2026-06-12 18:23:47,169 | INFO | engines.volume_profile | [vol_profile] POC=656.82 VA=[630.59-732.86] bias=BULLISH HVN=11 LVN=11
+2026-06-12 18:23:47,173 | INFO | engines.anchored_vwap | [avwap] monthly=742.82 quarterly=717.94 yearly=690.11 trend=MIXED above=2
+2026-06-12 18:23:47,174 | INFO | core.futures_orchestrator | [SPY] done 0.1s | RANGE conf=49% | NO_TRADE AI=38 grade=REJECT RR=0.00 | approved=False
+2026-06-12 18:23:48,505 | INFO | reports.sheet_writer | [sheet_writer] TradeSignals ← SPY
+2026-06-12 18:23:48,708 | INFO | alerts.line_alert | LINE message sent successfully
+2026-06-12 18:23:48,709 | INFO | core.futures_orchestrator_v2 | [SPY] v2 start price=740.6800 bars=502
+2026-06-12 18:23:48,752 | WARNING | hmmlearn.base | Model is not converging.  Current: 4413.566808814248 is not greater than 4414.291134811409. Delta is -0.7243259971610314
+2026-06-12 18:23:48,970 | INFO | engines.liquidity_regime | [liquidity] regime=RISK_ON conf=58.0 score=61.1 mult=0.90 VIX=18.3 DXY=STABLE Yield=STABLE source=live
+2026-06-12 18:23:49,759 | INFO | engines.market_breadth | [breadth] regime=BULL score=64.1 conf=56.7 crypto=35.2 equity=83.4 quality=FULL
+2026-06-12 18:23:50,294 | INFO | engines.cross_asset_engine | [cross_asset] TRANSITION conf=55.0 RS=50.5 btc_20d=+0.2% beta_spy=1.00 decouple=False dominant=SPY
+2026-06-12 18:23:50,298 | INFO | engines.regime_ensemble_v2 | [ensemble_v2] regime=RANGE conf=48.0% clarity=19.1 perm=NO_TRADE size=0.50 new_signals=True
+2026-06-12 18:23:50,299 | INFO | engines.regime_persistence | [persistence] RANGE p_self=0.010 E=1.0d half_life=0.5d exit_7d=100% exit_14d=100% score=0 label=EXHAUSTED next=BEAR
+2026-06-12 18:23:50,303 | INFO | engines.volatility_regime | [vol_regime] NORMAL_VOL score=34 hv20=15.1% hv5=18.8% atr=1.29% vov=0.086
+2026-06-12 18:23:50,307 | INFO | market_structure.structure_consistency | [structure_consistency] MODERATE penalty=10 conf=65  ['Bullish structure with Bearish RSI divergence — caution']
+2026-06-12 18:23:50,314 | INFO | engines.trade_quality | [trade_quality] REJECT score=40.8  scores={'regime': 21.5, 'trend': 15.1, 'structure': 82.5, 'ev': 65.0, 'rr': 0.0, 'volume': 30.0, 'volatility': 100.0}
+2026-06-12 18:23:50,754 | INFO | crypto.funding_rate | [funding] SPY rate=+0.00000 regime=NEUTRAL source=okx
+2026-06-12 18:23:51,202 | INFO | crypto.open_interest | [oi] SPY oi=4864 trend=STABLE signal=UNKNOWN source=okx
+2026-06-12 18:23:51,332 | WARNING | crypto.liquidation_engine | compute_liquidations fallback: only 0-dimensional arrays can be converted to Python scalars
+2026-06-12 18:23:51,333 | INFO | crypto.liquidation_engine | [liq_engine] SPY cascade=LOW nearest_long=734.01 nearest_short=747.35
+2026-06-12 18:23:51,415 | INFO | crypto.flow_engine | [flow_engine] SPY regime=NEUTRAL dir=NEUTRAL score=50.5 conf=54.2 funding=NEUTRAL oi=UNKNOWN L/S=1.00 cascade=LOW
+2026-06-12 18:23:51,993 | INFO | engines.forecast_engine | [forecast] [xgboost] BULLISH — 5d=+1.4% (P↑=56%) | 10d=+0.7% (P↑=58%) | 20d=+1.3% (P↑=63%) | conf=76%
+2026-06-12 18:23:51,993 | INFO | core.futures_orchestrator_v2 | [SPY] Conviction gate: score=0.0 < 50 → direction=WAIT
+2026-06-12 18:23:52,013 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=59.9%  P(SL)=91.1%  P(TP)=42.8%  E[ret]=1.34%  VaR95=6.32%
+2026-06-12 18:23:52,015 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=59.9% + P(stop)=91.1% = 151.0% > 100% — check simulation logic']
+2026-06-12 18:23:52,022 | INFO | engines.volume_profile | [vol_profile] POC=656.82 VA=[630.59-732.86] bias=BULLISH HVN=11 LVN=11
+2026-06-12 18:23:52,025 | INFO | engines.anchored_vwap | [avwap] monthly=742.82 quarterly=717.94 yearly=690.11 trend=MIXED above=2
+2026-06-12 18:23:52,026 | INFO | core.futures_orchestrator_v2 | [SPY] v2 done 3.3s | RANGE conf=43% | NO_TRADE AI=38 grade=REJECT conviction=0(NO TRADE) RR=0.00 liq=RISK_ON flow=NEUTRAL approved=False
+2026-06-12 18:23:53,333 | INFO | reports.sheet_writer_v2 | [sheet_v2] InstitutionalSignals ← SPY
+2026-06-12 18:23:54,831 | INFO | reports.sheet_writer_v2 | [sheet_v2] RegimeDashboard ← SPY
+2026-06-12 18:23:55,198 | WARNING | TradeAnalyze | [SPY] Option chain: cannot convert float NaN to integer
+2026-06-12 18:23:55,273 | WARNING | hmmlearn.base | Model is not converging.  Current: 4413.566808814248 is not greater than 4414.291134811409. Delta is -0.7243259971610314
+2026-06-12 18:23:55,281 | INFO | options.selection_engine | [selection] SPY: regime=RANGE iv_rank=79 rule=Rule3: RANGE+HighIV n=5
+2026-06-12 18:23:55,284 | INFO | options.selection_engine | [selection] SPY: top=LONG_STRADDLE score=64.7 pop=61% ev=11.71
+2026-06-12 18:23:55,284 | INFO | options.options_orchestrator | [SPY] options done 0.0s | LONG_STRADDLE score=65 pop=61% ev=11.7 | approved=False
+2026-06-12 18:23:56,073 | ERROR | reports.options_sheet_writer | Options_Analysis write failed (SPY): Options_Analysis
+2026-06-12 18:23:56,074 | ERROR | TradeAnalyze | [SPY] Options analysis: Options_Analysis
+2026-06-12 18:23:57,575 | INFO | TradeAnalyze | Downloading QQQ
+2026-06-12 18:23:57,671 | INFO | TradeAnalyze | QQQ: 502 rows loaded
+2026-06-12 18:23:57,672 | INFO | core.futures_orchestrator | [QQQ] start price=720.6500 bars=502
+2026-06-12 18:23:57,738 | WARNING | hmmlearn.base | Model is not converging.  Current: 4127.025983657112 is not greater than 4127.195126037346. Delta is -0.16914238023400685
+2026-06-12 18:23:57,744 | INFO | engines.regime_ensemble | [ensemble] regime=RANGE conf=44.2% clarity=12.5  markov=RANGE trend=STRONG_BULL vol=RANGE macro=RANGE
+2026-06-12 18:23:57,748 | INFO | engines.volatility_regime | [vol_regime] NORMAL_VOL score=52 hv20=26.7% hv5=33.8% atr=2.09% vov=0.093
+2026-06-12 18:23:57,762 | INFO | engines.trade_quality | [trade_quality] REJECT score=46.9  scores={'regime': 22.1, 'trend': 34.9, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 100.0}
+2026-06-12 18:23:57,781 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=59.4%  P(SL)=91.0%  P(TP)=52.7%  E[ret]=1.71%  VaR95=8.15%
+2026-06-12 18:23:57,783 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=59.4% + P(stop)=91.0% = 150.4% > 100% — check simulation logic']
+2026-06-12 18:23:57,792 | INFO | engines.volume_profile | [vol_profile] POC=588.42 VA=[557.53-704.25] bias=BULLISH HVN=9 LVN=14
+2026-06-12 18:23:57,797 | INFO | engines.anchored_vwap | [avwap] monthly=718.43 quarterly=677.35 yearly=630.95 trend=BULLISH above=4
+2026-06-12 18:23:57,797 | INFO | core.futures_orchestrator | [QQQ] done 0.1s | RANGE conf=44% | NO_TRADE AI=43 grade=REJECT RR=0.00 | approved=False
+2026-06-12 18:23:59,195 | INFO | reports.sheet_writer | [sheet_writer] TradeSignals ← QQQ
+2026-06-12 18:23:59,376 | INFO | alerts.line_alert | LINE message sent successfully
+2026-06-12 18:23:59,377 | INFO | core.futures_orchestrator_v2 | [QQQ] v2 start price=720.6500 bars=502
+2026-06-12 18:23:59,425 | WARNING | hmmlearn.base | Model is not converging.  Current: 4127.025983657112 is not greater than 4127.195126037346. Delta is -0.16914238023400685
+2026-06-12 18:23:59,640 | INFO | engines.liquidity_regime | [liquidity] regime=RISK_ON conf=58.0 score=61.1 mult=0.90 VIX=18.3 DXY=STABLE Yield=STABLE source=live
+2026-06-12 18:24:00,338 | INFO | engines.market_breadth | [breadth] regime=BULL score=64.1 conf=56.7 crypto=35.1 equity=83.4 quality=FULL
+2026-06-12 18:24:00,850 | INFO | engines.cross_asset_engine | [cross_asset] TRANSITION conf=55.0 RS=51.2 btc_20d=+1.7% beta_spy=1.65 decouple=False dominant=QQQ
+2026-06-12 18:24:00,854 | INFO | engines.regime_ensemble_v2 | [ensemble_v2] regime=RANGE conf=40.1% clarity=11.7 perm=NO_TRADE size=0.50 new_signals=True
+2026-06-12 18:24:00,854 | INFO | engines.regime_persistence | [persistence] RANGE p_self=0.914 E=11.6d half_life=7.7d exit_7d=47% exit_14d=72% score=77 label=MATURING next=BULL
+2026-06-12 18:24:00,859 | INFO | engines.volatility_regime | [vol_regime] NORMAL_VOL score=52 hv20=26.7% hv5=33.8% atr=2.09% vov=0.093
+2026-06-12 18:24:00,870 | INFO | engines.trade_quality | [trade_quality] REJECT score=46.5  scores={'regime': 20.1, 'trend': 34.9, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 100.0}
+2026-06-12 18:24:01,149 | INFO | crypto.funding_rate | [funding] QQQ rate=+0.00000 regime=NEUTRAL source=okx
+2026-06-12 18:24:01,424 | INFO | crypto.open_interest | [oi] QQQ oi=14043 trend=STABLE signal=UNKNOWN source=okx
+2026-06-12 18:24:01,456 | WARNING | crypto.liquidation_engine | compute_liquidations fallback: only 0-dimensional arrays can be converted to Python scalars
+2026-06-12 18:24:01,457 | INFO | crypto.liquidation_engine | [liq_engine] QQQ cascade=LOW nearest_long=714.16 nearest_short=727.14
+2026-06-12 18:24:01,533 | INFO | crypto.flow_engine | [flow_engine] QQQ regime=NEUTRAL dir=NEUTRAL score=50.5 conf=54.2 funding=NEUTRAL oi=UNKNOWN L/S=1.00 cascade=LOW
+2026-06-12 18:24:02,103 | INFO | engines.forecast_engine | [forecast] [xgboost] BULLISH — 5d=+0.4% (P↑=55%) | 10d=-0.4% (P↑=56%) | 20d=+0.7% (P↑=62%) | conf=64%
+2026-06-12 18:24:02,103 | INFO | core.futures_orchestrator_v2 | [QQQ] Conviction gate: score=0.0 < 50 → direction=WAIT
+2026-06-12 18:24:02,137 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=59.4%  P(SL)=91.0%  P(TP)=52.7%  E[ret]=1.71%  VaR95=8.15%
+2026-06-12 18:24:02,141 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=59.4% + P(stop)=91.0% = 150.4% > 100% — check simulation logic']
+2026-06-12 18:24:02,150 | INFO | engines.volume_profile | [vol_profile] POC=588.42 VA=[557.53-704.25] bias=BULLISH HVN=9 LVN=14
+2026-06-12 18:24:02,154 | INFO | engines.anchored_vwap | [avwap] monthly=718.43 quarterly=677.35 yearly=630.95 trend=BULLISH above=4
+2026-06-12 18:24:02,155 | INFO | core.futures_orchestrator_v2 | [QQQ] v2 done 2.8s | RANGE conf=40% | NO_TRADE AI=42 grade=REJECT conviction=0(NO TRADE) RR=0.00 liq=RISK_ON flow=NEUTRAL approved=False
+2026-06-12 18:24:03,546 | INFO | reports.sheet_writer_v2 | [sheet_v2] InstitutionalSignals ← QQQ
+2026-06-12 18:24:04,847 | INFO | reports.sheet_writer_v2 | [sheet_v2] RegimeDashboard ← QQQ
+2026-06-12 18:24:05,220 | WARNING | TradeAnalyze | [QQQ] Option chain: cannot convert float NaN to integer
+2026-06-12 18:24:05,275 | WARNING | hmmlearn.base | Model is not converging.  Current: 4127.025983657112 is not greater than 4127.195126037346. Delta is -0.16914238023400685
+2026-06-12 18:24:05,280 | INFO | options.selection_engine | [selection] QQQ: regime=RANGE iv_rank=100 rule=Rule3: RANGE+HighIV n=5
+2026-06-12 18:24:05,281 | INFO | options.selection_engine | [selection] QQQ: top=LONG_STRADDLE score=63.8 pop=61% ev=11.41
+2026-06-12 18:24:05,281 | INFO | options.options_orchestrator | [QQQ] options done 0.0s | LONG_STRADDLE score=64 pop=61% ev=11.4 | approved=False
+2026-06-12 18:24:06,127 | ERROR | reports.options_sheet_writer | Options_Analysis write failed (QQQ): Options_Analysis
+2026-06-12 18:24:06,128 | ERROR | TradeAnalyze | [QQQ] Options analysis: Options_Analysis
+2026-06-12 18:24:07,630 | INFO | TradeAnalyze | Downloading GC=F
+2026-06-12 18:24:07,691 | INFO | TradeAnalyze | GC=F: 504 rows loaded
+2026-06-12 18:24:07,692 | INFO | core.futures_orchestrator | [GC=F] start price=4247.7998 bars=504
+2026-06-12 18:24:07,750 | WARNING | hmmlearn.base | Model is not converging.  Current: 3912.871466876786 is not greater than 3912.8715113971084. Delta is -4.452032226254232e-05
+2026-06-12 18:24:07,755 | INFO | engines.regime_ensemble | [ensemble] regime=BEAR conf=59.6% clarity=25.8  markov=BEAR trend=BEAR vol=RANGE macro=BEAR
+2026-06-12 18:24:07,760 | INFO | engines.volatility_regime | [vol_regime] HIGH_VOL score=56 hv20=27.1% hv5=43.4% atr=2.36% vov=0.105
+2026-06-12 18:24:07,777 | INFO | engines.trade_quality | [trade_quality] C score=61.0  scores={'regime': 47.7, 'trend': 78.2, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 100.0, 'volatility': 50.0}
+2026-06-12 18:24:07,803 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=62.2%  P(SL)=91.8%  P(TP)=58.1%  E[ret]=2.38%  VaR95=8.35%
+2026-06-12 18:24:07,806 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=62.2% + P(stop)=91.8% = 154.0% > 100% — check simulation logic']
+2026-06-12 18:24:07,817 | INFO | engines.volume_profile | [vol_profile] POC=4446.86 VA=[4243.18-4871.21] bias=NEUTRAL HVN=6 LVN=36
+2026-06-12 18:24:07,824 | INFO | engines.anchored_vwap | [avwap] monthly=4247.49 quarterly=4361.06 yearly=4679.27 trend=BEARISH above=1
+2026-06-12 18:24:07,824 | INFO | core.futures_orchestrator | [GC=F] done 0.1s | BEAR conf=60% | NO_TRADE AI=62 grade=C RR=0.00 | approved=False
+2026-06-12 18:24:09,208 | INFO | reports.sheet_writer | [sheet_writer] TradeSignals ← GC=F
+2026-06-12 18:24:09,388 | INFO | alerts.line_alert | LINE message sent successfully
+2026-06-12 18:24:09,389 | INFO | core.futures_orchestrator_v2 | [GC=F] v2 start price=4247.7998 bars=504
+2026-06-12 18:24:09,464 | WARNING | hmmlearn.base | Model is not converging.  Current: 3912.871466876786 is not greater than 3912.8715113971084. Delta is -4.452032226254232e-05
+2026-06-12 18:24:09,687 | INFO | engines.liquidity_regime | [liquidity] regime=RISK_ON conf=58.0 score=61.1 mult=0.90 VIX=18.3 DXY=STABLE Yield=STABLE source=live
+2026-06-12 18:24:10,446 | INFO | engines.market_breadth | [breadth] regime=BULL score=64.1 conf=56.7 crypto=35.2 equity=83.4 quality=FULL
+2026-06-12 18:24:11,030 | INFO | engines.cross_asset_engine | [cross_asset] TRANSITION conf=55.0 RS=46.5 btc_20d=-6.8% beta_spy=1.28 decouple=False dominant=GLD
+2026-06-12 18:24:11,035 | INFO | engines.regime_ensemble_v2 | [ensemble_v2] regime=BEAR conf=48.9% clarity=14.7 perm=NO_TRADE size=0.50 new_signals=True
+2026-06-12 18:24:11,035 | INFO | engines.regime_persistence | [persistence] BEAR p_self=0.940 E=16.5d half_life=11.1d exit_7d=35% exit_14d=58% score=83 label=ESTABLISHED next=STRONG_BEAR
+2026-06-12 18:24:11,040 | INFO | engines.volatility_regime | [vol_regime] HIGH_VOL score=56 hv20=27.1% hv5=43.4% atr=2.36% vov=0.105
+2026-06-12 18:24:11,051 | INFO | engines.trade_quality | [trade_quality] C score=59.3  scores={'regime': 39.1, 'trend': 78.2, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 100.0, 'volatility': 50.0}
+2026-06-12 18:24:11,327 | WARNING | crypto.funding_rate | [funding] No data for GC=F — using zero fallback
+2026-06-12 18:24:11,328 | INFO | crypto.funding_rate | [funding] GC=F rate=+0.00000 regime=NEUTRAL source=unavailable
+2026-06-12 18:24:11,766 | INFO | crypto.open_interest | [oi] GC=F oi=0 trend=STABLE signal=UNKNOWN source=unavailable
+2026-06-12 18:24:11,807 | WARNING | crypto.liquidation_engine | compute_liquidations fallback: only 0-dimensional arrays can be converted to Python scalars
+2026-06-12 18:24:11,807 | INFO | crypto.liquidation_engine | [liq_engine] GC=F cascade=LOW nearest_long=4209.57 nearest_short=4286.03
+2026-06-12 18:24:11,899 | INFO | crypto.flow_engine | [flow_engine] GC=F regime=NEUTRAL dir=NEUTRAL score=50.5 conf=54.2 funding=NEUTRAL oi=UNKNOWN L/S=1.00 cascade=LOW
+2026-06-12 18:24:12,373 | INFO | engines.forecast_engine | [forecast] [xgboost] BULLISH — 5d=-2.4% (P↑=58%) | 10d=+1.8% (P↑=63%) | 20d=+2.4% (P↑=68%) | conf=76%
+2026-06-12 18:24:12,374 | INFO | core.futures_orchestrator_v2 | [GC=F] Conviction gate: score=0.0 < 50 → direction=WAIT
+2026-06-12 18:24:12,394 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=62.2%  P(SL)=91.8%  P(TP)=58.1%  E[ret]=2.38%  VaR95=8.35%
+2026-06-12 18:24:12,396 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=62.2% + P(stop)=91.8% = 154.0% > 100% — check simulation logic']
+2026-06-12 18:24:12,403 | INFO | engines.volume_profile | [vol_profile] POC=4446.86 VA=[4243.18-4871.21] bias=NEUTRAL HVN=6 LVN=36
+2026-06-12 18:24:12,406 | INFO | engines.anchored_vwap | [avwap] monthly=4247.49 quarterly=4361.06 yearly=4679.27 trend=BEARISH above=1
+2026-06-12 18:24:12,407 | INFO | core.futures_orchestrator_v2 | [GC=F] v2 done 3.0s | BEAR conf=49% | NO_TRADE AI=59 grade=C conviction=0(NO TRADE) RR=0.00 liq=RISK_ON flow=NEUTRAL approved=False
+2026-06-12 18:24:13,724 | INFO | reports.sheet_writer_v2 | [sheet_v2] InstitutionalSignals ← GC=F
+2026-06-12 18:24:15,054 | INFO | reports.sheet_writer_v2 | [sheet_v2] RegimeDashboard ← GC=F
+2026-06-12 18:24:15,310 | INFO | data.option_chain | [yfinance] GC=F: 0 option rows fetched
+2026-06-12 18:24:15,363 | WARNING | hmmlearn.base | Model is not converging.  Current: 3912.871466876786 is not greater than 3912.8715113971084. Delta is -4.452032226254232e-05
+2026-06-12 18:24:15,368 | INFO | options.selection_engine | [selection] GC=F: regime=BEAR iv_rank=42 rule=COMPOSITE_RANK n=3
+2026-06-12 18:24:15,369 | INFO | options.selection_engine | [selection] GC=F: top=LONG_PUT score=82.1 pop=53% ev=2171.05
+2026-06-12 18:24:15,369 | INFO | options.options_orchestrator | [GC=F] options done 0.0s | LONG_PUT score=82 pop=53% ev=2171.1 | approved=False
+2026-06-12 18:24:16,161 | ERROR | reports.options_sheet_writer | Options_Analysis write failed (GC=F): Options_Analysis
+2026-06-12 18:24:16,161 | ERROR | TradeAnalyze | [GC=F] Options analysis: Options_Analysis
+2026-06-12 18:24:17,663 | INFO | TradeAnalyze | Downloading CL=F
+2026-06-12 18:24:17,730 | INFO | TradeAnalyze | CL=F: 504 rows loaded
+2026-06-12 18:24:17,731 | INFO | core.futures_orchestrator | [CL=F] start price=84.9800 bars=504
+2026-06-12 18:24:17,790 | WARNING | hmmlearn.base | Model is not converging.  Current: 3563.122305363586 is not greater than 3563.1261447795846. Delta is -0.0038394159987547027
+2026-06-12 18:24:17,798 | INFO | engines.regime_ensemble | [ensemble] regime=STRONG_BEAR conf=48.4% clarity=28.2  markov=STRONG_BEAR trend=BEAR vol=STRONG_BEAR macro=BEAR
+2026-06-12 18:24:17,803 | INFO | engines.volatility_regime | [vol_regime] PANIC_VOL score=100 hv20=55.6% hv5=40.2% atr=6.62% vov=0.206
+2026-06-12 18:24:17,817 | INFO | engines.trade_quality | [trade_quality] C score=55.3  scores={'regime': 48.4, 'trend': 86.0, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 10.0}
+2026-06-12 18:24:17,836 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=48.4%  P(SL)=87.1%  P(TP)=64.6%  E[ret]=0.27%  VaR95=18.52%
+2026-06-12 18:24:17,838 | WARNING | risk.consistency_checker | [consistency] 2 errors: ['P(target)=64.6% > P(profit)=48.4% — impossible: target hit ⊂ profit, so P(target) must be ≤ P(profit)', 'RR=0.0 < 1 and POP=48.4% < 50 → negative EV trade, must reject']
+2026-06-12 18:24:17,838 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=48.4% + P(stop)=87.1% = 135.5% > 100% — check simulation logic']
+2026-06-12 18:24:17,844 | INFO | engines.volume_profile | [vol_profile] POC=91.31 VA=[89.83-102.43] bias=BEARISH HVN=20 LVN=22
+2026-06-12 18:24:17,848 | INFO | engines.anchored_vwap | [avwap] monthly=91.03 quarterly=96.93 yearly=82.96 trend=BEARISH above=1
+2026-06-12 18:24:17,848 | INFO | core.futures_orchestrator | [CL=F] done 0.1s | STRONG_BEAR conf=48% | NO_TRADE AI=64 grade=C RR=0.00 | approved=False
+2026-06-12 18:24:19,180 | INFO | reports.sheet_writer | [sheet_writer] TradeSignals ← CL=F
+2026-06-12 18:24:19,372 | INFO | alerts.line_alert | LINE message sent successfully
+2026-06-12 18:24:19,373 | INFO | core.futures_orchestrator_v2 | [CL=F] v2 start price=84.9800 bars=504
+2026-06-12 18:24:19,431 | WARNING | hmmlearn.base | Model is not converging.  Current: 3563.122305363586 is not greater than 3563.1261447795846. Delta is -0.0038394159987547027
+2026-06-12 18:24:19,658 | INFO | engines.liquidity_regime | [liquidity] regime=RISK_ON conf=58.0 score=61.1 mult=0.90 VIX=18.3 DXY=STABLE Yield=STABLE source=live
+2026-06-12 18:24:20,335 | INFO | engines.market_breadth | [breadth] regime=BULL score=64.1 conf=56.7 crypto=35.2 equity=83.4 quality=FULL
+2026-06-12 18:24:20,806 | INFO | engines.cross_asset_engine | [cross_asset] TRANSITION conf=40.0 RS=45.0 btc_20d=-19.4% beta_spy=-1.48 decouple=True dominant=TLT
+2026-06-12 18:24:20,811 | INFO | engines.regime_ensemble_v2 | [ensemble_v2] regime=STRONG_BEAR conf=39.2% clarity=12.0 perm=NO_TRADE size=0.50 new_signals=True
+2026-06-12 18:24:20,811 | INFO | engines.regime_persistence | [persistence] STRONG_BEAR p_self=0.971 E=34.2d half_life=23.4d exit_7d=19% exit_14d=34% score=92 label=ESTABLISHED next=RANGE
+2026-06-12 18:24:20,815 | INFO | engines.volatility_regime | [vol_regime] PANIC_VOL score=100 hv20=55.6% hv5=40.2% atr=6.62% vov=0.206
+2026-06-12 18:24:20,826 | INFO | engines.trade_quality | [trade_quality] C score=53.5  scores={'regime': 39.2, 'trend': 86.0, 'structure': 87.5, 'ev': 65.0, 'rr': 0.0, 'volume': 50.0, 'volatility': 10.0}
+2026-06-12 18:24:21,121 | WARNING | crypto.funding_rate | [funding] No data for CL=F — using zero fallback
+2026-06-12 18:24:21,122 | INFO | crypto.funding_rate | [funding] CL=F rate=+0.00000 regime=NEUTRAL source=unavailable
+2026-06-12 18:24:21,404 | INFO | crypto.open_interest | [oi] CL=F oi=0 trend=STABLE signal=UNKNOWN source=unavailable
+2026-06-12 18:24:21,450 | WARNING | crypto.liquidation_engine | compute_liquidations fallback: only 0-dimensional arrays can be converted to Python scalars
+2026-06-12 18:24:21,450 | INFO | crypto.liquidation_engine | [liq_engine] CL=F cascade=LOW nearest_long=84.22 nearest_short=85.74
+2026-06-12 18:24:21,532 | INFO | crypto.flow_engine | [flow_engine] CL=F regime=NEUTRAL dir=NEUTRAL score=50.5 conf=54.2 funding=NEUTRAL oi=UNKNOWN L/S=1.00 cascade=LOW
+2026-06-12 18:24:22,027 | INFO | engines.forecast_engine | [forecast] [xgboost] NEUTRAL — 5d=+9.9% (P↑=57%) | 10d=+13.5% (P↑=61%) | 20d=+7.7% (P↑=53%) | conf=64%
+2026-06-12 18:24:22,027 | INFO | core.futures_orchestrator_v2 | [CL=F] Conviction gate: score=0.0 < 50 → direction=WAIT
+2026-06-12 18:24:22,048 | INFO | simulation.monte_carlo | MC[10000 paths, 20d]  P(profit)=48.4%  P(SL)=87.1%  P(TP)=64.6%  E[ret]=0.27%  VaR95=18.52%
+2026-06-12 18:24:22,050 | WARNING | risk.consistency_checker | [consistency] 2 errors: ['P(target)=64.6% > P(profit)=48.4% — impossible: target hit ⊂ profit, so P(target) must be ≤ P(profit)', 'RR=0.0 < 1 and POP=48.4% < 50 → negative EV trade, must reject']
+2026-06-12 18:24:22,050 | INFO | risk.consistency_checker | [consistency] 1 warnings: ['P(profit)=48.4% + P(stop)=87.1% = 135.5% > 100% — check simulation logic']
+2026-06-12 18:24:22,057 | INFO | engines.volume_profile | [vol_profile] POC=91.31 VA=[89.83-102.43] bias=BEARISH HVN=20 LVN=22
+2026-06-12 18:24:22,060 | INFO | engines.anchored_vwap | [avwap] monthly=91.03 quarterly=96.93 yearly=82.96 trend=BEARISH above=1
+2026-06-12 18:24:22,061 | INFO | core.futures_orchestrator_v2 | [CL=F] v2 done 2.7s | STRONG_BEAR conf=39% | NO_TRADE AI=61 grade=C conviction=0(NO TRADE) RR=0.00 liq=RISK_ON flow=NEUTRAL approved=False
+2026-06-12 18:24:23,466 | INFO | reports.sheet_writer_v2 | [sheet_v2] InstitutionalSignals ← CL=F
+2026-06-12 18:24:25,161 | INFO | reports.sheet_writer_v2 | [sheet_v2] RegimeDashboard ← CL=F
+2026-06-12 18:24:26,488 | INFO | data.option_chain | [yfinance] CL=F: 0 option rows fetched
+2026-06-12 18:24:26,545 | WARNING | hmmlearn.base | Model is not converging.  Current: 3563.122305363586 is not greater than 3563.1261447795846. Delta is -0.0038394159987547027
+2026-06-12 18:24:26,551 | INFO | options.selection_engine | [selection] CL=F: regime=STRONG_BEAR iv_rank=48 rule=COMPOSITE_RANK n=4
+2026-06-12 18:24:26,552 | INFO | options.selection_engine | [selection] CL=F: top=LONG_PUT score=80.9 pop=54% ev=44.97
+2026-06-12 18:24:26,552 | INFO | options.options_orchestrator | [CL=F] options done 0.0s | LONG_PUT score=81 pop=54% ev=45.0 | approved=False
+2026-06-12 18:24:27,254 | ERROR | reports.options_sheet_writer | Options_Analysis write failed (CL=F): Options_Analysis
+2026-06-12 18:24:27,255 | ERROR | TradeAnalyze | [CL=F] Options analysis: Options_Analysis
+2026-06-12 18:24:28,757 | INFO | TradeAnalyze | Engine done — success=5 fail=0

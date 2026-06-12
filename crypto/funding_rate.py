@@ -140,3 +140,11 @@ def fetch_funding_rate(symbol: str) -> FundingRateResult:
         contrarian_signal= contrarian,
         interpretation   = interp_map.get(regime, ""),
     )
+
+# Add this function at the end of the file (after fetch_funding_rate)
+
+def compute_funding_rate(symbol: str) -> FundingRateResult:
+    """
+    Wrapper for fetch_funding_rate to match v2 orchestrator naming.
+    """
+    return fetch_funding_rate(symbol)
