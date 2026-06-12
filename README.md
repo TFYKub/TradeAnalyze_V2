@@ -139,6 +139,8 @@ Markov Regime · Regime Ensemble · Volatility Regime · Market Structure · Bay
 
 ```bash
 # 1. Install (includes v2 dependencies)
+python -m venv venv_v2
+source venv_v2/bin/activate   # Windows: venv_v2\Scripts\activate
 pip install -r requirements_v2.txt
 
 # 2. Configure environment (copy .env.example → .env)

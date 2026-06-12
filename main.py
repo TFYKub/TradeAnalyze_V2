@@ -1,9 +1,8 @@
 """
-TradeAnalyze — Main Entry Point  (v2 integration – dry run)
+TradeAnalyze — Main Entry Point  (v2 — full institutional)
 =============================================================
-Runs both v1 (live) and v2 (dry-run) pipelines.
-v2 writes institutional sheets but does NOT send LINE alerts.
-After validation, switch to v2-only.
+Uses FuturesOrchestrator_v2 exclusively.
+All LINE messages go through line_alert_v2 (which exports send_line_message).
 """
 import time
 import traceback
@@ -12,9 +11,8 @@ warnings.filterwarnings("ignore")
 
 from config.config_validator import validate
 from config.logging_config import logger
-from alerts.line_alert import send_line_message
-from core.futures_orchestrator import FuturesOrchestrator
-from core.futures_orchestrator_v2 import FuturesOrchestrator_v2   # NEW
+from alerts.line_alert_v2 import send_line_message, send_institutional_alert
+from core.futures_orchestrator_v2 import FuturesOrchestrator_v2
 from data.market_data import get_market_data
 from data.option_chain import fetch_option_chain
 from engines.greeks_pipeline import enrich_with_greeks
@@ -29,14 +27,12 @@ from reports.options_formatter import format_options_message
 from reports.options_sheet_writer import write_options_analysis
 from reports.option_chain_writer import clear_symbol_rows, write_option_chain
 from reports.sheet_writer import log_trade_signals
-from reports.sheet_writer_v2 import write_all_institutional   # NEW
+from reports.sheet_writer_v2 import write_all_institutional
 from utils.symbol_loader import load_symbols_with_type
 
-# Flag to control v2 LINE alerts – set to False during dry run
-V2_SEND_ALERTS = True   # Change to True after validation
+MIN_CONVICTION_ALERT = 60.0
 
 def _build_trade_signal_dict(symbol, futures, asset_type):
-    """Build signal dict for TradeSignals sheet."""
     return {
         "symbol": symbol, "regime": futures.regime, "price": futures.price,
         "position": futures.final_decision, "entry": futures.entry,
@@ -54,7 +50,6 @@ def _build_trade_signal_dict(symbol, futures, asset_type):
     }
 
 def _run_crypto_extras(symbol: str, price: float) -> str:
-    """Fetch crypto-specific data and return a LINE-ready summary string."""
     lines = ["", "━"*28, "🔐 CRYPTO INSTITUTIONAL DATA", "━"*28]
     try:
         from crypto.funding_rate import fetch_funding_rate
@@ -70,8 +65,7 @@ def _run_crypto_extras(symbol: str, price: float) -> str:
 
     try:
         from crypto.open_interest import fetch_open_interest
-        price_change = 0.0
-        oi = fetch_open_interest(symbol, price_change=price_change)
+        oi = fetch_open_interest(symbol, price_change=0.0)
         lines += [
             f"  OI          : {oi.open_interest:,.0f}",
             f"  OI Trend    : {oi.oi_trend}",
@@ -84,9 +78,7 @@ def _run_crypto_extras(symbol: str, price: float) -> str:
 
 def run_trading_engine() -> None:
     validate()
-
-    futures_orch_v1 = FuturesOrchestrator(win_rate=0.52, avg_rr=2.5)
-    futures_orch_v2 = FuturesOrchestrator_v2(win_rate=0.52, avg_rr=2.5)   # NEW
+    futures_orch = FuturesOrchestrator_v2(win_rate=0.52, avg_rr=2.5)
     regime_engine = MarkovRegimeEngine()
     success = fail = 0
 
@@ -99,9 +91,8 @@ def run_trading_engine() -> None:
     print(f"📊 Symbols: {len(symbol_list)}")
 
     for item in symbol_list:
-        symbol     = item["symbol"]
+        symbol = item["symbol"]
         asset_type = item["asset_type"]
-
         print(f"\n{'━'*44}")
         print(f"📊 {symbol}  ({asset_type})")
 
@@ -111,63 +102,49 @@ def run_trading_engine() -> None:
                 print(f"  ❌ No market data"); fail += 1; continue
 
             price = float(df["Close"].iloc[-1])
+            print(f"  ⚙️  Futures analysis (v2)...")
+            futures = futures_orch.run(symbol, df)
 
-            # ── A) v1 Futures Pipeline (live alerts) ─────────────────────────
-            print(f"  ⚙️  Futures analysis (v1)...")
-            futures_v1 = futures_orch_v1.run(symbol, df)
+            dec_e = {"LONG":"🟢","SHORT":"🔴","NO_TRADE":"⏸️"}.get(futures.final_decision,"❓")
+            print(f"  {dec_e} {futures.final_decision}  "
+                  f"Regime={futures.regime}({futures.regime_conf:.0f}%)  "
+                  f"Grade={futures.trade_grade}  AI={futures.ai_score:.0f}  "
+                  f"RR={futures.rr:.2f}  MC={futures.mc_profit_prob:.0f}%")
 
-            dec_e = {"LONG":"🟢","SHORT":"🔴","NO_TRADE":"⏸️"}.get(futures_v1.final_decision,"❓")
-            print(f"  {dec_e} {futures_v1.final_decision}  "
-                  f"Regime={futures_v1.regime}({futures_v1.regime_conf:.0f}%)  "
-                  f"Grade={futures_v1.trade_grade}  AI={futures_v1.ai_score:.0f}  "
-                  f"RR={futures_v1.rr:.2f}  MC={futures_v1.mc_profit_prob:.0f}%")
-
-            # Write TradeSignals sheet (v1)
-            sig_dict = _build_trade_signal_dict(symbol, futures_v1, asset_type)
+            # Write sheets
+            sig_dict = _build_trade_signal_dict(symbol, futures, asset_type)
             log_trade_signals(symbol, [sig_dict], [{"bull":0,"bear":0,"sideway":0}])
-
-            # Send v1 LINE alerts (live)
-            msg_v1 = futures_v1.report_text[:4490] + "\n…" if len(futures_v1.report_text) > 4500 else futures_v1.report_text
-            send_line_message(msg_v1)
-            print(f"  📱 Futures report (v1) → LINE ✅")
-
-            # ── B) v2 Futures Pipeline (dry run – sheets only, no alerts) ────
-            print(f"  ⚙️  Futures analysis (v2 dry run)...")
-            futures_v2 = futures_orch_v2.run(symbol, df)
-
-            # Write institutional sheets (new)
             write_all_institutional(
-                symbol=symbol, price=price, result_v2=futures_v2,
-                liquidity=getattr(futures_v2, 'liquidity_result', None),
-                flow=getattr(futures_v2, 'flow_result', None),
-                breadth=getattr(futures_v2, 'breadth_result', None),
-                persistence=getattr(futures_v2, 'persistence_result', None),
-                forecast=getattr(futures_v2, 'forecast_result', None),
-                conviction=getattr(futures_v2, 'conviction_result', None),
-                cross_asset=getattr(futures_v2, 'cross_asset_result', None),
+                symbol=symbol, price=price, result_v2=futures,
+                liquidity=getattr(futures, 'liquidity_result', None),
+                flow=getattr(futures, 'flow_result', None),
+                breadth=getattr(futures, 'breadth_result', None),
+                persistence=getattr(futures, 'persistence_result', None),
+                forecast=getattr(futures, 'forecast_result', None),
+                conviction=getattr(futures, 'conviction_result', None),
+                cross_asset=getattr(futures, 'cross_asset_result', None),
             )
 
-            # Optionally send v2 alerts (disabled during dry run)
-            if V2_SEND_ALERTS:
-                from alerts.line_alert_v2 import send_institutional_alert
-                send_institutional_alert(
-                    symbol=symbol, price=price, result_v2=futures_v2,
-                    liquidity=getattr(futures_v2, 'liquidity_result', None),
-                    flow=getattr(futures_v2, 'flow_result', None),
-                    breadth=getattr(futures_v2, 'breadth_result', None),
-                    persistence=getattr(futures_v2, 'persistence_result', None),
-                    forecast=getattr(futures_v2, 'forecast_result', None),
-                    conviction=getattr(futures_v2, 'conviction_result', None),
-                    cross_asset=getattr(futures_v2, 'cross_asset_result', None),
-                    min_conviction=65.0,
-                )
-            else:
-                print(f"  📋 v2 institutional sheets written (alerts disabled)")
+            # LINE messages (original report + institutional alert)
+            msg = futures.report_text[:4490] + "\n…" if len(futures.report_text) > 4500 else futures.report_text
+            send_line_message(msg)
+            print(f"  📱 Futures report → LINE ✅")
 
-            # ── C) Option Chain + IV Rank + Vol Surface (unchanged) ──────────
+            send_institutional_alert(
+                symbol=symbol, price=price, result_v2=futures,
+                liquidity=getattr(futures, 'liquidity_result', None),
+                flow=getattr(futures, 'flow_result', None),
+                breadth=getattr(futures, 'breadth_result', None),
+                persistence=getattr(futures, 'persistence_result', None),
+                forecast=getattr(futures, 'forecast_result', None),
+                conviction=getattr(futures, 'conviction_result', None),
+                cross_asset=getattr(futures, 'cross_asset_result', None),
+                min_conviction=MIN_CONVICTION_ALERT,
+            )
+
+            # ── Option Chain ─────────────────────────────────────────────────
             print(f"  ⚙️  Option chain...")
             enriched_chain = []
-            iv_rank_result = iv_surface = None
             try:
                 raw_chain = fetch_option_chain(symbol, price, asset_type=asset_type)
                 enriched_chain = enrich_with_greeks(raw_chain, spot=price)
@@ -188,7 +165,7 @@ def run_trading_engine() -> None:
                 logger.warning("[%s] Option chain: %s", symbol, exc)
                 print(f"  ⚠️  Option chain: {exc}")
 
-            # ── D) Options Analysis (unchanged) ──────────────────────────────
+            # ── Options Analysis ─────────────────────────────────────────────
             print(f"  ⚙️  Options analysis...")
             try:
                 df_ind = compute_ema(compute_rsi(compute_atr(df.copy())))
@@ -196,12 +173,12 @@ def run_trading_engine() -> None:
                     reg_result = regime_engine.detect(df_ind)
                     regime_probs = reg_result.regime_probs_all
                 except Exception:
-                    regime_probs = {futures_v1.regime: 0.65}
+                    regime_probs = {futures.regime: 0.65}
 
                 opts_rec = run_options_analysis(
                     symbol=symbol, price=price, df=df_ind,
-                    regime=futures_v1.regime, regime_conf=futures_v1.regime_conf,
-                    regime_probs=regime_probs, ai_score=futures_v1.ai_score,
+                    regime=futures.regime, regime_conf=futures.regime_conf,
+                    regime_probs=regime_probs, ai_score=futures.ai_score,
                     enriched_chain=enriched_chain,
                 )
                 write_options_analysis(opts_rec)
@@ -217,7 +194,7 @@ def run_trading_engine() -> None:
                 logger.error("[%s] Options analysis: %s", symbol, exc)
                 print(f"  ⚠️  Options: {exc}")
 
-            # ── E) Crypto extras (unchanged) ─────────────────────────────────
+            # ── Crypto extras ────────────────────────────────────────────────
             if asset_type == "crypto":
                 try:
                     crypto_msg = _run_crypto_extras(symbol, price)
@@ -227,7 +204,7 @@ def run_trading_engine() -> None:
                     print(f"  ⚠️  Crypto extras: {exc}")
 
             success += 1
-            print(f"  ⏱  {futures_v1.runtime:.1f}s")
+            print(f"  ⏱  {futures.runtime:.1f}s")
             time.sleep(1.5)
 
         except Exception:
