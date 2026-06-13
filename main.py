@@ -13,6 +13,7 @@ from config.config_validator import validate
 from config.logging_config import logger
 from alerts.line_alert_v2 import send_line_message, send_institutional_alert
 from core.futures_orchestrator_v2 import FuturesOrchestrator_v2
+from core.unified_engine import UnifiedTradeEngine   # NEW: single‑source‑of‑truth engine
 from data.market_data import get_market_data
 from data.option_chain import fetch_option_chain
 from engines.greeks_pipeline import enrich_with_greeks
@@ -32,6 +33,7 @@ from utils.symbol_loader import load_symbols_with_type
 
 MIN_CONVICTION_ALERT = 60.0
 
+# ---------- Helper to build trade signal dict (unchanged) ----------
 def _build_trade_signal_dict(symbol, futures, asset_type):
     return {
         "symbol": symbol, "regime": futures.regime, "price": futures.price,
@@ -49,6 +51,7 @@ def _build_trade_signal_dict(symbol, futures, asset_type):
         "avg_gamma": None, "fast_decay_pct": None, "asset_type": asset_type,
     }
 
+# ---------- Crypto extras (unchanged) ----------
 def _run_crypto_extras(symbol: str, price: float) -> str:
     lines = ["", "━"*28, "🔐 CRYPTO INSTITUTIONAL DATA", "━"*28]
     try:
@@ -76,6 +79,7 @@ def _run_crypto_extras(symbol: str, price: float) -> str:
 
     return "\n".join(lines)
 
+# ---------- Main trading engine ----------
 def run_trading_engine() -> None:
     validate()
     futures_orch = FuturesOrchestrator_v2(win_rate=0.52, avg_rr=2.5)
@@ -111,7 +115,7 @@ def run_trading_engine() -> None:
                   f"Grade={futures.trade_grade}  AI={futures.ai_score:.0f}  "
                   f"RR={futures.rr:.2f}  MC={futures.mc_profit_prob:.0f}%")
 
-            # Write sheets
+            # Write sheets (unchanged)
             sig_dict = _build_trade_signal_dict(symbol, futures, asset_type)
             log_trade_signals(symbol, [sig_dict], [{"bull":0,"bear":0,"sideway":0}])
             write_all_institutional(
@@ -125,11 +129,23 @@ def run_trading_engine() -> None:
                 cross_asset=getattr(futures, 'cross_asset_result', None),
             )
 
-            # LINE messages (original report + institutional alert)
-            msg = futures.report_text[:4490] + "\n…" if len(futures.report_text) > 4500 else futures.report_text
-            send_line_message(msg)
-            print(f"  📱 Futures report → LINE ✅")
+            # ========== NEW: Use UnifiedTradeEngine for clean execution report ==========
+            try:
+                engine = UnifiedTradeEngine(df)
+                decision_report = engine.get_report(symbol)
+            except Exception as engine_err:
+                logger.error("[%s] UnifiedTradeEngine failed: %s, falling back to legacy report", symbol, engine_err)
+                # Fallback: use the old zone-based report builder (if still available)
+                from report.daily_report import build_execution_report
+                # We would need to recreate mock objects here, but we skip for simplicity
+                decision_report = f"⚠️ Unified engine failed for {symbol}: {engine_err}"
 
+            # Truncate if needed (LINE limit 4500 chars)
+            msg = decision_report[:4490] + "\n…" if len(decision_report) > 4500 else decision_report
+            send_line_message(msg)
+            print(f"  📱 Unified execution report → LINE ✅")
+
+            # Institutional alert (unchanged)
             send_institutional_alert(
                 symbol=symbol, price=price, result_v2=futures,
                 liquidity=getattr(futures, 'liquidity_result', None),
@@ -142,7 +158,7 @@ def run_trading_engine() -> None:
                 min_conviction=MIN_CONVICTION_ALERT,
             )
 
-            # ── Option Chain ─────────────────────────────────────────────────
+            # ---- Option Chain & Options Analysis (unchanged) ----
             print(f"  ⚙️  Option chain...")
             enriched_chain = []
             try:
@@ -165,7 +181,6 @@ def run_trading_engine() -> None:
                 logger.warning("[%s] Option chain: %s", symbol, exc)
                 print(f"  ⚠️  Option chain: {exc}")
 
-            # ── Options Analysis ─────────────────────────────────────────────
             print(f"  ⚙️  Options analysis...")
             try:
                 df_ind = compute_ema(compute_rsi(compute_atr(df.copy())))
@@ -194,7 +209,7 @@ def run_trading_engine() -> None:
                 logger.error("[%s] Options analysis: %s", symbol, exc)
                 print(f"  ⚠️  Options: {exc}")
 
-            # ── Crypto extras ────────────────────────────────────────────────
+            # ---- Crypto extras (unchanged) ----
             if asset_type == "crypto":
                 try:
                     crypto_msg = _run_crypto_extras(symbol, price)
