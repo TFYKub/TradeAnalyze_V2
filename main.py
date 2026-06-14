@@ -11,9 +11,8 @@ warnings.filterwarnings("ignore")
 
 from config.config_validator import validate
 from config.logging_config import logger
-from alerts.line_alert_v2 import send_line_message, send_institutional_alert
-from core.futures_orchestrator_v2 import FuturesOrchestrator_v2
-from core.unified_engine import UnifiedTradeEngine   # NEW: single‑source‑of‑truth engine
+from alerts.line_alert_v2 import send_institutional_alert
+from alerts.notification_manager import send_notification
 from data.market_data import get_market_data
 from data.option_chain import fetch_option_chain
 from engines.greeks_pipeline import enrich_with_greeks
@@ -30,6 +29,18 @@ from reports.option_chain_writer import clear_symbol_rows, write_option_chain
 from reports.sheet_writer import log_trade_signals
 from reports.sheet_writer_v2 import write_all_institutional
 from utils.symbol_loader import load_symbols_with_type
+
+from config.config import USE_V3
+
+if USE_V3:
+    from core.futures_orchestrator_v3 import FuturesOrchestrator_v3
+    from reports.execution_report_v3 import build_execution_report_v3
+    OrchestratorClass = FuturesOrchestrator_v3
+    report_builder = build_execution_report_v3
+else:
+    from core.futures_orchestrator_v2 import FuturesOrchestrator_v2
+    OrchestratorClass = FuturesOrchestrator_v2
+    report_builder = None
 
 MIN_CONVICTION_ALERT = 60.0
 
@@ -82,7 +93,7 @@ def _run_crypto_extras(symbol: str, price: float) -> str:
 # ---------- Main trading engine ----------
 def run_trading_engine() -> None:
     validate()
-    futures_orch = FuturesOrchestrator_v2(win_rate=0.52, avg_rr=2.5)
+    orchestrator = OrchestratorClass(win_rate=0.52, avg_rr=2.5)
     regime_engine = MarkovRegimeEngine()
     success = fail = 0
 
@@ -106,8 +117,8 @@ def run_trading_engine() -> None:
                 print(f"  ❌ No market data"); fail += 1; continue
 
             price = float(df["Close"].iloc[-1])
-            print(f"  ⚙️  Futures analysis (v2)...")
-            futures = futures_orch.run(symbol, df)
+            print(f"  ⚙️  Futures analysis...")
+            futures = orchestrator.run(symbol, df)
 
             dec_e = {"LONG":"🟢","SHORT":"🔴","NO_TRADE":"⏸️"}.get(futures.final_decision,"❓")
             print(f"  {dec_e} {futures.final_decision}  "
@@ -129,38 +140,10 @@ def run_trading_engine() -> None:
                 cross_asset=getattr(futures, 'cross_asset_result', None),
             )
 
-            # ========== NEW: Use UnifiedTradeEngine for clean execution report ==========
-            try:
-                engine = UnifiedTradeEngine(df)
-                decision_report = engine.get_report(symbol)
-            except Exception as engine_err:
-                logger.error("[%s] UnifiedTradeEngine failed: %s, falling back to legacy report", symbol, engine_err)
-                # Fallback: use the old zone-based report builder (if still available)
-                from report.daily_report import build_execution_report
-                # We would need to recreate mock objects here, but we skip for simplicity
-                decision_report = f"⚠️ Unified engine failed for {symbol}: {engine_err}"
-
-            # Truncate if needed (LINE limit 4500 chars)
-            msg = decision_report[:4490] + "\n…" if len(decision_report) > 4500 else decision_report
-            send_line_message(msg)
-            print(f"  📱 Unified execution report → LINE ✅")
-
-            # Institutional alert (unchanged)
-            send_institutional_alert(
-                symbol=symbol, price=price, result_v2=futures,
-                liquidity=getattr(futures, 'liquidity_result', None),
-                flow=getattr(futures, 'flow_result', None),
-                breadth=getattr(futures, 'breadth_result', None),
-                persistence=getattr(futures, 'persistence_result', None),
-                forecast=getattr(futures, 'forecast_result', None),
-                conviction=getattr(futures, 'conviction_result', None),
-                cross_asset=getattr(futures, 'cross_asset_result', None),
-                min_conviction=MIN_CONVICTION_ALERT,
-            )
-
-            # ---- Option Chain & Options Analysis (unchanged) ----
+            # ---- Option Chain & Options Analysis (merged into main report) ----
             print(f"  ⚙️  Option chain...")
             enriched_chain = []
+            opts_rec = None
             try:
                 raw_chain = fetch_option_chain(symbol, price, asset_type=asset_type)
                 enriched_chain = enrich_with_greeks(raw_chain, spot=price)
@@ -197,9 +180,7 @@ def run_trading_engine() -> None:
                     enriched_chain=enriched_chain,
                 )
                 write_options_analysis(opts_rec)
-                opts_msg = format_options_message(opts_rec)
-                if len(opts_msg) > 4500: opts_msg = opts_msg[:4490] + "\n…"
-                send_line_message(opts_msg)
+                # DO NOT send separate message – will be merged into main report
                 print(f"  📊 Options: {opts_rec.primary.name}  "
                       f"score={opts_rec.primary.score:.0f}  "
                       f"EV={opts_rec.primary.ev:.1f}  "
@@ -213,10 +194,36 @@ def run_trading_engine() -> None:
             if asset_type == "crypto":
                 try:
                     crypto_msg = _run_crypto_extras(symbol, price)
-                    send_line_message(crypto_msg)
+                    send_notification(crypto_msg)
                     print(f"  🔐 Crypto data sent")
                 except Exception as exc:
                     print(f"  ⚠️  Crypto extras: {exc}")
+
+            # ---- Build unified execution report (futures + options) ----
+            if USE_V3:
+                v3_state = getattr(futures, 'v3_state', None)
+                # Pass opts_rec to the report builder
+                decision_report = report_builder(symbol, price, futures, v3_state, opts_rec)
+            else:
+                decision_report = futures.report_text
+
+            # Truncate if needed
+            msg = decision_report[:4490] + "\n…" if len(decision_report) > 4500 else decision_report
+            send_notification(msg)
+            print(f"  📱 Unified execution report → Notification sent")
+
+            # Institutional alert (unchanged)
+            send_institutional_alert(
+                symbol=symbol, price=price, result_v2=futures,
+                liquidity=getattr(futures, 'liquidity_result', None),
+                flow=getattr(futures, 'flow_result', None),
+                breadth=getattr(futures, 'breadth_result', None),
+                persistence=getattr(futures, 'persistence_result', None),
+                forecast=getattr(futures, 'forecast_result', None),
+                conviction=getattr(futures, 'conviction_result', None),
+                cross_asset=getattr(futures, 'cross_asset_result', None),
+                min_conviction=MIN_CONVICTION_ALERT,
+            )
 
             success += 1
             print(f"  ⏱  {futures.runtime:.1f}s")

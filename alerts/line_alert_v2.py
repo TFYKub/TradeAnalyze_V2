@@ -1,82 +1,186 @@
 """
-LINE Alert System  v2  (Phases 12–21 Integration)
-===================================================
-Extends the original send_line_message() with structured formatters
-for all institutional engine outputs.
-
-Design:
-  • Reuses the same LINE_TOKEN and broadcast endpoint as v1
-  • Adds format_institutional_alert() — the main new entry point
-  • Produces compact, emoji-rich messages that fit LINE's 4500-char limit
-  • Separates signal type into blocks so traders can scan on mobile quickly
-  • All formatters are pure functions — testable without network
-
-Message Structure:
-  ┌─ HEADER: Symbol + Price + Decision + Grade
-  ├─ REGIME BLOCK: Regime + Conviction + Persistence
-  ├─ MACRO BLOCK:  Liquidity + Breadth + Cross-Asset
-  ├─ FLOW BLOCK:   Funding + OI + L/S + Cascade
-  ├─ FORECAST:     5d/10d/20d return + P(↑)
-  └─ TRADE SETUP:  Entry + SL + TP + Kelly size
-
-Usage:
-  from alerts.line_alert_v2 import send_institutional_alert
-
-  send_institutional_alert(
-      result_v2   = result,          # FuturesResult_v2
-      liquidity   = liquidity_result,
-      flow        = flow_result,
-      breadth     = breadth_result,
-      persistence = persistence_result,
-      forecast    = forecast_result,
-      conviction  = conviction_result,
-  )
+LINE Alert System v2 – Production‑Grade with Rate Limiting & Retries
+====================================================================
+Extends the original send_line_message() with:
+  • Token bucket rate limiter (100 requests/minute)
+  • Exponential backoff with jitter on 429 errors
+  • Respects Retry-After header
+  • Global lock to serialise requests
+  • Detailed header logging for error diagnosis
+  • Monthly quota detection and permanent disable
+All formatting functions are unchanged from the original V2.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import random
+import time
+from threading import Lock
 from typing import Optional
 
 import requests
 
+# Import global LINE_DISABLED flag from config
+from config.config import LINE_TOKEN as CFG_LINE_TOKEN, LINE_DISABLED as GLOBAL_LINE_DISABLED
+
 logger = logging.getLogger(__name__)
 
-LINE_TOKEN          = os.getenv("LINE_TOKEN")
+# ----------------------------------------------------------------------
+# Helper: safe attribute getter
+# ----------------------------------------------------------------------
+def _g(obj, *attrs, default="—"):
+    for attr in attrs:
+        v = getattr(obj, attr, None)
+        if v is not None:
+            return v
+    return default
+
+# ----------------------------------------------------------------------
+# Global runtime flag for LINE disabled (exported)
+# ----------------------------------------------------------------------
+LINE_DISABLED = GLOBAL_LINE_DISABLED
+
+# ----------------------------------------------------------------------
+# Rate limiting: token bucket (100 requests per minute – safer limit)
+# ----------------------------------------------------------------------
+_RATE_LIMIT_PER_MINUTE = 100
+_TOKEN_BUCKET = {
+    "tokens": _RATE_LIMIT_PER_MINUTE,
+    "last_refill": time.time(),
+}
+_send_lock = Lock()
+
+def _refill_bucket() -> None:
+    now = time.time()
+    elapsed = now - _TOKEN_BUCKET["last_refill"]
+    tokens_to_add = elapsed * (_RATE_LIMIT_PER_MINUTE / 60.0)
+    if tokens_to_add > 0:
+        _TOKEN_BUCKET["tokens"] = min(_RATE_LIMIT_PER_MINUTE,
+                                      _TOKEN_BUCKET["tokens"] + tokens_to_add)
+        _TOKEN_BUCKET["last_refill"] = now
+        logger.debug("[line_v2] Token bucket refilled: now %.1f tokens", _TOKEN_BUCKET["tokens"])
+
+def _consume_token() -> bool:
+    _refill_bucket()
+    if _TOKEN_BUCKET["tokens"] >= 1:
+        _TOKEN_BUCKET["tokens"] -= 1
+        logger.debug("[line_v2] Token consumed: %.1f tokens remaining", _TOKEN_BUCKET["tokens"])
+        return True
+    logger.debug("[line_v2] No tokens available, waiting...")
+    return False
+
+# ----------------------------------------------------------------------
+# Low‑level sender with exponential backoff and jitter
+# ----------------------------------------------------------------------
+LINE_TOKEN = CFG_LINE_TOKEN
 _LINE_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
-LINE_CHAR_LIMIT     = 4500
+LINE_CHAR_LIMIT = 4500
+MAX_RETRIES = 10
 
+def _log_response_headers(resp: requests.Response) -> None:
+    """Log all response headers for debugging."""
+    headers_to_log = [
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-RateLimit-Reset",
+        "Retry-After",
+    ]
+    logger.warning("[line_v2] Response status: %d %s", resp.status_code, resp.reason)
+    for header in headers_to_log:
+        if header in resp.headers:
+            logger.warning("[line_v2] Header %s: %s", header, resp.headers[header])
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("[line_v2] Full response headers: %s", dict(resp.headers))
 
-# ── Low-level sender (unchanged from v1 — kept for backward compatibility) ────
 def send_line_message(msg: str) -> bool:
-    """
-    Broadcast a text message via LINE Messaging API.
-    Identical to v1 — preserved for backward compatibility.
-    """
+    """Broadcast a text message via LINE Messaging API with rate limiting and smart retries."""
+    global LINE_DISABLED
+    if LINE_DISABLED:
+        logger.info("[LINE] Notifications disabled (monthly quota exceeded)")
+        return False
+
     if not LINE_TOKEN:
         logger.warning("LINE_TOKEN not set — skipping LINE notification")
         return False
 
-    headers = {
-        "Authorization": f"Bearer {LINE_TOKEN}",
-        "Content-Type":  "application/json",
-    }
-    payload = {"messages": [{"type": "text", "text": msg[:LINE_CHAR_LIMIT]}]}
+    with _send_lock:
+        # Wait for a token
+        while not _consume_token():
+            time.sleep(0.1)
 
-    try:
-        resp = requests.post(
-            _LINE_BROADCAST_URL, headers=headers,
-            json=payload, timeout=10,
-        )
-        resp.raise_for_status()
-        logger.info("[line_v2] message sent (%d chars)", len(msg))
-        return True
-    except requests.RequestException as exc:
-        logger.error("[line_v2] send failed: %s", exc)
+        headers = {
+            "Authorization": f"Bearer {LINE_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        payload = {"messages": [{"type": "text", "text": msg[:LINE_CHAR_LIMIT]}]}
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = requests.post(_LINE_BROADCAST_URL, headers=headers, json=payload, timeout=30)
+
+                if resp.status_code == 200:
+                    logger.info("[line_v2] message sent (%d chars)", len(msg))
+                    return True
+
+                if resp.status_code == 429:
+                    _log_response_headers(resp)
+                    error_str = ""
+                    try:
+                        error_body = resp.json()
+                        error_str = json.dumps(error_body).lower()
+                        logger.warning("[line_v2] 429 error body: %s", error_str[:200])
+                    except:
+                        error_str = resp.text.lower()
+                        logger.warning("[line_v2] 429 error body (text): %s", resp.text[:200])
+
+                    # Monthly quota detection
+                    if "monthly" in error_str and "limit" in error_str:
+                        logger.warning("[LINE] Monthly quota exceeded – disabling LINE for this runtime")
+                        LINE_DISABLED = True
+                        import config.config as cfg
+                        cfg.LINE_DISABLED = True
+                        return False
+
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            wait = int(retry_after)
+                        except ValueError:
+                            wait = min(60, 2 ** attempt)
+                    else:
+                        wait = min(60, 2 ** attempt)
+                    wait += random.uniform(0, 3)
+                    logger.warning("[line_v2] 429 Too Many Requests (attempt %d/%d), waiting %.1fs", attempt, MAX_RETRIES, wait)
+                    time.sleep(wait)
+                    continue
+
+                # Other errors
+                _log_response_headers(resp)
+                try:
+                    error_body = resp.json()
+                    logger.error("[line_v2] HTTP %d error body: %s", resp.status_code, json.dumps(error_body)[:200])
+                except:
+                    logger.error("[line_v2] HTTP %d error body (text): %s", resp.status_code, resp.text[:200])
+                return False
+
+            except requests.Timeout:
+                logger.error("[line_v2] Request timeout (attempt %d/%d)", attempt, MAX_RETRIES)
+                if attempt == MAX_RETRIES:
+                    return False
+                time.sleep(min(60, 2 ** attempt))
+                continue
+            except Exception as exc:
+                logger.error("[line_v2] send failed: %s", exc)
+                return False
+
+        logger.error("[line_v2] send failed after %d retries", MAX_RETRIES)
         return False
 
-
-# ── Emoji Maps ─────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
+# Emoji maps and block formatters (unchanged from original V2)
+# ----------------------------------------------------------------------
 _REGIME_EMOJI = {
     "STRONG_BULL": "🚀", "BULL": "📈",
     "RANGE": "↔️",
@@ -111,17 +215,6 @@ _PERSIST_EMOJI = {
     "FRESH": "🔵", "EXHAUSTED": "🔴",
 }
 
-
-# ── Block Formatters ───────────────────────────────────────────────────────────
-def _g(obj, *attrs, default="—"):
-    """Safe getattr chain. _g(obj, 'a', 'b') → obj.a if exists else obj.b else default."""
-    for attr in attrs:
-        v = getattr(obj, attr, None)
-        if v is not None:
-            return v
-    return default
-
-
 def _fmt_header(symbol: str, price: float, r) -> str:
     decision = _g(r, "final_decision", default="—")
     grade    = _g(r, "trade_grade",    default="—")
@@ -137,7 +230,6 @@ def _fmt_header(symbol: str, price: float, r) -> str:
         f"{dec_str}  Grade: {grade}  AI: {ai:.0f}\n"
         f"{appr_str}\n"
     )
-
 
 def _fmt_regime_block(r, persistence) -> str:
     regime   = _g(r, "regime",       default="—")
@@ -164,9 +256,7 @@ def _fmt_regime_block(r, persistence) -> str:
         f"Exit7d: {pe_ex7:.0f}%  Next→{pe_next}\n"
     )
 
-
 def _fmt_macro_block(liquidity, breadth, cross_asset) -> str:
-    # Liquidity
     liq_r    = _g(liquidity, "liquidity_regime", default="—")
     liq_s    = _g(liquidity, "score",            default=0.0)
     liq_mult = _g(liquidity, "risk_multiplier",  default=1.0)
@@ -174,7 +264,6 @@ def _fmt_macro_block(liquidity, breadth, cross_asset) -> str:
     dxy_t    = _g(liquidity, "dxy_trend",        default="—")
     l_emoji  = _LIQ_EMOJI.get(liq_r, "❓")
 
-    # Breadth
     br_r   = _g(breadth, "breadth_regime", default="—")
     br_s   = _g(breadth, "breadth_score",  default=0.0)
     eb     = getattr(breadth, "equity_breadth", None)
@@ -182,7 +271,6 @@ def _fmt_macro_block(liquidity, breadth, cross_asset) -> str:
     p200   = _g(eb, "pct_above_200dma",      default=0.0)
     b_emoji= _BR_EMOJI.get(br_r, "❓")
 
-    # Cross-Asset
     ca_r   = _g(cross_asset, "cross_asset_regime",       default="—")
     rs     = _g(cross_asset, "relative_strength_score",  default=0.0)
     b_spy  = _g(cross_asset, "btc_beta_to_spy",          default=0.0)
@@ -199,11 +287,9 @@ def _fmt_macro_block(liquidity, breadth, cross_asset) -> str:
         f"  {c_emoji} Cross-Asset: {ca_r}  RS:{rs:.0f}  β_SPY:{b_spy:.2f} {dec_str}\n"
     )
 
-
 def _fmt_flow_block(flow) -> str:
     if flow is None:
         return "\n🌀 FLOW: Data unavailable\n"
-
     fl_r  = flow.flow_regime
     fl_s  = flow.flow_score
     fl_d  = flow.flow_direction
@@ -213,7 +299,6 @@ def _fmt_flow_block(flow) -> str:
     oi    = flow.oi_signal
     casc  = flow.cascade_risk
     f_emoji = _FLOW_EMOJI.get(fl_r, "❓")
-
     return (
         f"\n🌀 DERIVATIVES FLOW\n"
         f"  {f_emoji} {fl_r} ({fl_s:.0f}/100  {fl_d}  {fl_c:.0f}%)\n"
@@ -221,11 +306,9 @@ def _fmt_flow_block(flow) -> str:
         f"  OI: {oi}   Cascade: {casc}\n"
     )
 
-
 def _fmt_forecast_block(forecast) -> str:
     if forecast is None:
         return "\n🔮 FORECAST: Data unavailable\n"
-
     fc_d   = forecast.forecast_direction
     fc_c   = forecast.forecast_confidence
     model  = forecast.model_used
@@ -234,12 +317,10 @@ def _fmt_forecast_block(forecast) -> str:
     r10    = hf.get("10d", {})
     r20    = hf.get("20d", {})
     f_emoji= _FC_EMOJI.get(fc_d, "❓")
-
     top_feat = sorted(
         forecast.feature_importances.items(), key=lambda x: -x[1]
     )[:2] if forecast.feature_importances else []
     feat_str = "  ".join(f"{k}" for k, _ in top_feat) if top_feat else ""
-
     return (
         f"\n🔮 ML FORECAST  [{model}]\n"
         f"  {f_emoji} {fc_d}  Conf: {fc_c:.0f}%\n"
@@ -248,7 +329,6 @@ def _fmt_forecast_block(forecast) -> str:
         f"  20d: {r20.get('return_pct',0):+.1f}%  P(↑):{r20.get('prob_up',0.5):.0%}\n"
         + (f"  Drivers: {feat_str}\n" if feat_str else "")
     )
-
 
 def _fmt_trade_setup(r) -> str:
     entry = _g(r, "entry",     default=0.0)
@@ -259,10 +339,8 @@ def _fmt_trade_setup(r) -> str:
     kelly = _g(r, "kelly",     default=0.0)
     mc    = _g(r, "mc_profit_prob", default=0.0)
     ev    = _g(r, "ev",        default=0.0)
-
     tp1_str = f"${tp1:,.4f}" if tp1 else "—"
     tp2_str = f"${tp2:,.4f}" if tp2 else "—"
-
     return (
         f"\n💰 TRADE SETUP\n"
         f"  Entry: ${entry:,.4f}   SL: ${sl:,.4f}\n"
@@ -271,7 +349,6 @@ def _fmt_trade_setup(r) -> str:
         f"  EV: {ev:.2f}\n"
     )
 
-
 def _fmt_footer(r) -> str:
     runtime = _g(r, "runtime", default=0.0)
     return (
@@ -279,8 +356,6 @@ def _fmt_footer(r) -> str:
         f"⏱ {runtime:.1f}s  |  TradeAnalyze v2\n"
     )
 
-
-# ── Master Formatter ───────────────────────────────────────────────────────────
 def format_institutional_alert(
     symbol:      str,
     price:       float,
@@ -293,12 +368,6 @@ def format_institutional_alert(
     conviction = None,
     cross_asset= None,
 ) -> str:
-    """
-    Build a complete institutional LINE alert message.
-
-    Returns a string of ≤ 4500 characters.
-    All engine results are optional — missing blocks show 'Data unavailable'.
-    """
     blocks = [
         _fmt_header(symbol, price, result_v2),
         _fmt_regime_block(result_v2, persistence),
@@ -309,43 +378,25 @@ def format_institutional_alert(
         _fmt_footer(result_v2),
     ]
     msg = "".join(blocks)
-
-    # Hard truncate with indicator if over limit
     if len(msg) > LINE_CHAR_LIMIT:
         msg = msg[:LINE_CHAR_LIMIT - 20] + "\n...[truncated]"
-
     return msg
 
-
-# ── Conditional Alert Filters ──────────────────────────────────────────────────
 def _should_alert(result_v2, conviction=None, min_conviction: float = 50.0) -> bool:
-    """
-    Return True if this result warrants a LINE alert.
-    Filters out low-conviction WAIT signals to reduce noise.
-    """
-    decision  = _g(result_v2, "final_decision", default="WAIT")
-    cv_score  = _g(conviction, "conviction_score",
-                   default=_g(result_v2, "conviction_score", default=0.0))
-    approved  = _g(result_v2, "approved", default=False)
-
-    # Always alert on CRISIS liquidity
+    decision = _g(result_v2, "final_decision", default="WAIT")
+    cv_score = _g(conviction, "conviction_score",
+                  default=_g(result_v2, "conviction_score", default=0.0))
+    approved = _g(result_v2, "approved", default=False)
     liq = _g(result_v2, "liquidity_regime", default="RISK_ON")
     if liq == "CRISIS":
         return True
-
-    # Alert on approved trades above conviction threshold
     if approved and cv_score >= min_conviction:
         return True
-
-    # Alert on squeeze events regardless of conviction
     flow_r = _g(result_v2, "flow_regime", default="NEUTRAL")
     if flow_r in ("SHORT_SQUEEZE", "LONG_SQUEEZE"):
         return True
-
     return False
 
-
-# ── Main Entry Point ───────────────────────────────────────────────────────────
 def send_institutional_alert(
     symbol:         str,
     price:          float,
@@ -360,16 +411,6 @@ def send_institutional_alert(
     force:          bool = False,
     min_conviction: float = 50.0,
 ) -> bool:
-    """
-    Format and send an institutional LINE alert.
-
-    Parameters
-    ----------
-    force          : bypass conviction/decision filter and always send
-    min_conviction : minimum conviction score to trigger alert
-
-    Returns True if message was sent, False if filtered or failed.
-    """
     if not force and not _should_alert(result_v2, conviction, min_conviction):
         logger.info(
             "[line_v2] %s alert filtered (decision=%s conviction=%.0f)",
@@ -379,7 +420,6 @@ def send_institutional_alert(
                default=_g(result_v2, "conviction_score", default=0.0)),
         )
         return False
-
     try:
         msg = format_institutional_alert(
             symbol, price, result_v2,
@@ -394,25 +434,16 @@ def send_institutional_alert(
         logger.error("[line_v2] format/send failed for %s: %s", symbol, exc)
         return False
 
-
-# ── Crisis-Only Broadcast ──────────────────────────────────────────────────────
 def send_crisis_alert(liquidity) -> bool:
-    """
-    Broadcast a short crisis alert when liquidity regime = CRISIS.
-    Used as an independent monitor that runs even without a full trade analysis.
-    """
     if liquidity is None:
         return False
-
     regime   = _g(liquidity, "liquidity_regime", default="")
     vix      = _g(liquidity, "vix_level",        default=0.0)
     score    = _g(liquidity, "score",             default=0.0)
     dxy_t    = _g(liquidity, "dxy_trend",         default="—")
     yield_t  = _g(liquidity, "yield_trend",       default="—")
-
     if regime != "CRISIS":
         return False
-
     msg = (
         f"🚨 CRISIS ALERT — TradeAnalyze v2\n"
         f"{'━'*28}\n"

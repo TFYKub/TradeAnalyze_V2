@@ -15,6 +15,8 @@ jobs:
       SHEET_ID: ${{ secrets.SHEET_ID }}
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+      USE_V3: true                # 👈 Run V3 with all institutional upgrades
+      # To run V2 instead, set USE_V3: false or remove this line
 
     steps:
 
@@ -42,6 +44,7 @@ jobs:
           date -u
           python --version
           pip --version
+          echo "Running with USE_V3=$USE_V3"
 
       - name: Run TradeAnalyze
         run: |

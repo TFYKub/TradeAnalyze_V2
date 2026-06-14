@@ -27,3 +27,39 @@ else:
 GOOGLE_CREDENTIALS = GOOGLE_CREDENTIALS_PATH   # for compatibility with existing code
 
 TIMEZONE = "Asia/Bangkok"
+
+# ========== V3 Feature Flags ==========
+USE_V3 = os.getenv("USE_V3", "False").lower() == "true"
+
+V3_PHASES = {
+    "walk_forward": True,
+    "quantile_forecast": True,
+    "regime_switching_mc": True,
+    "portfolio_optimizer": True,
+    "crypto_flow_v2": True,
+    "dealer_greeks": True,
+    "stress_testing": True,
+}
+
+# ========== Notification Configuration ==========
+LINE_TOKEN = os.getenv("LINE_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Runtime flag set when LINE monthly quota exceeded
+LINE_DISABLED = False
+
+# ========== Startup Validation ==========
+# This runs when config.py is imported (after logging is not yet configured,
+# so we use print statements for clarity).
+print("\n[CONFIG] Notification channel status:")
+if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+    print("  ✅ Telegram enabled")
+else:
+    print("  ⚠️ Telegram disabled (missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID)")
+
+if LINE_TOKEN:
+    print("  ✅ LINE enabled")
+else:
+    print("  ⚠️ LINE disabled (missing LINE_TOKEN)")
+print("")   # blank line for readability
