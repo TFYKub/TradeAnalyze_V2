@@ -37,7 +37,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy yfinance scipy hmmlearn scikit-learn xgboost lightgbm requests gspread google-auth python-dotenv
-          # Verify installations
           python -c "import xgboost, lightgbm, hmmlearn; print('ML libs OK')"
 
       - name: Create requirements.txt (if missing)
@@ -49,15 +48,15 @@ jobs:
 
       - name: Initialise signal database (V3)
         run: |
-          python -c "
-from engines.signal_tracker import SignalDatabase
-import sqlite3
-try:
-    db = SignalDatabase()
-    print('✅ signals.db initialised')
-except Exception as e:
-    print(f'⚠️ DB init: {e}')
-"
+          python << 'EOF'
+          from engines.signal_tracker import SignalDatabase
+          import sqlite3
+          try:
+              db = SignalDatabase()
+              print('✅ signals.db initialised')
+          except Exception as e:
+              print(f'⚠️ DB init: {e}')
+          EOF
 
       - name: Run TradeAnalyze with full traceback
         run: |
