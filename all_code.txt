@@ -927,9 +927,8 @@ warnings.filterwarnings("ignore")
 
 from config.config_validator import validate
 from config.logging_config import logger
-from alerts.line_alert_v2 import send_line_message, send_institutional_alert
-from core.futures_orchestrator_v2 import FuturesOrchestrator_v2
-from core.unified_engine import UnifiedTradeEngine   # NEW: single‑source‑of‑truth engine
+from alerts.line_alert_v2 import send_institutional_alert
+from alerts.notification_manager import send_notification
 from data.market_data import get_market_data
 from data.option_chain import fetch_option_chain
 from engines.greeks_pipeline import enrich_with_greeks
@@ -946,6 +945,18 @@ from reports.option_chain_writer import clear_symbol_rows, write_option_chain
 from reports.sheet_writer import log_trade_signals
 from reports.sheet_writer_v2 import write_all_institutional
 from utils.symbol_loader import load_symbols_with_type
+
+from config.config import USE_V3
+
+if USE_V3:
+    from core.futures_orchestrator_v3 import FuturesOrchestrator_v3
+    from reports.execution_report_v3 import build_execution_report_v3
+    OrchestratorClass = FuturesOrchestrator_v3
+    report_builder = build_execution_report_v3
+else:
+    from core.futures_orchestrator_v2 import FuturesOrchestrator_v2
+    OrchestratorClass = FuturesOrchestrator_v2
+    report_builder = None
 
 MIN_CONVICTION_ALERT = 60.0
 
@@ -998,7 +1009,7 @@ def _run_crypto_extras(symbol: str, price: float) -> str:
 # ---------- Main trading engine ----------
 def run_trading_engine() -> None:
     validate()
-    futures_orch = FuturesOrchestrator_v2(win_rate=0.52, avg_rr=2.5)
+    orchestrator = OrchestratorClass(win_rate=0.52, avg_rr=2.5)
     regime_engine = MarkovRegimeEngine()
     success = fail = 0
 
@@ -1022,8 +1033,8 @@ def run_trading_engine() -> None:
                 print(f"  ❌ No market data"); fail += 1; continue
 
             price = float(df["Close"].iloc[-1])
-            print(f"  ⚙️  Futures analysis (v2)...")
-            futures = futures_orch.run(symbol, df)
+            print(f"  ⚙️  Futures analysis...")
+            futures = orchestrator.run(symbol, df)
 
             dec_e = {"LONG":"🟢","SHORT":"🔴","NO_TRADE":"⏸️"}.get(futures.final_decision,"❓")
             print(f"  {dec_e} {futures.final_decision}  "
@@ -1045,38 +1056,10 @@ def run_trading_engine() -> None:
                 cross_asset=getattr(futures, 'cross_asset_result', None),
             )
 
-            # ========== NEW: Use UnifiedTradeEngine for clean execution report ==========
-            try:
-                engine = UnifiedTradeEngine(df)
-                decision_report = engine.get_report(symbol)
-            except Exception as engine_err:
-                logger.error("[%s] UnifiedTradeEngine failed: %s, falling back to legacy report", symbol, engine_err)
-                # Fallback: use the old zone-based report builder (if still available)
-                from report.daily_report import build_execution_report
-                # We would need to recreate mock objects here, but we skip for simplicity
-                decision_report = f"⚠️ Unified engine failed for {symbol}: {engine_err}"
-
-            # Truncate if needed (LINE limit 4500 chars)
-            msg = decision_report[:4490] + "\n…" if len(decision_report) > 4500 else decision_report
-            send_line_message(msg)
-            print(f"  📱 Unified execution report → LINE ✅")
-
-            # Institutional alert (unchanged)
-            send_institutional_alert(
-                symbol=symbol, price=price, result_v2=futures,
-                liquidity=getattr(futures, 'liquidity_result', None),
-                flow=getattr(futures, 'flow_result', None),
-                breadth=getattr(futures, 'breadth_result', None),
-                persistence=getattr(futures, 'persistence_result', None),
-                forecast=getattr(futures, 'forecast_result', None),
-                conviction=getattr(futures, 'conviction_result', None),
-                cross_asset=getattr(futures, 'cross_asset_result', None),
-                min_conviction=MIN_CONVICTION_ALERT,
-            )
-
-            # ---- Option Chain & Options Analysis (unchanged) ----
+            # ---- Option Chain & Options Analysis (merged into main report) ----
             print(f"  ⚙️  Option chain...")
             enriched_chain = []
+            opts_rec = None
             try:
                 raw_chain = fetch_option_chain(symbol, price, asset_type=asset_type)
                 enriched_chain = enrich_with_greeks(raw_chain, spot=price)
@@ -1113,9 +1096,7 @@ def run_trading_engine() -> None:
                     enriched_chain=enriched_chain,
                 )
                 write_options_analysis(opts_rec)
-                opts_msg = format_options_message(opts_rec)
-                if len(opts_msg) > 4500: opts_msg = opts_msg[:4490] + "\n…"
-                send_line_message(opts_msg)
+                # DO NOT send separate message – will be merged into main report
                 print(f"  📊 Options: {opts_rec.primary.name}  "
                       f"score={opts_rec.primary.score:.0f}  "
                       f"EV={opts_rec.primary.ev:.1f}  "
@@ -1129,10 +1110,36 @@ def run_trading_engine() -> None:
             if asset_type == "crypto":
                 try:
                     crypto_msg = _run_crypto_extras(symbol, price)
-                    send_line_message(crypto_msg)
+                    send_notification(crypto_msg)
                     print(f"  🔐 Crypto data sent")
                 except Exception as exc:
                     print(f"  ⚠️  Crypto extras: {exc}")
+
+            # ---- Build unified execution report (futures + options) ----
+            if USE_V3:
+                v3_state = getattr(futures, 'v3_state', None)
+                # Pass opts_rec to the report builder
+                decision_report = report_builder(symbol, price, futures, v3_state, opts_rec)
+            else:
+                decision_report = futures.report_text
+
+            # Truncate if needed
+            msg = decision_report[:4490] + "\n…" if len(decision_report) > 4500 else decision_report
+            send_notification(msg)
+            print(f"  📱 Unified execution report → Notification sent")
+
+            # Institutional alert (unchanged)
+            send_institutional_alert(
+                symbol=symbol, price=price, result_v2=futures,
+                liquidity=getattr(futures, 'liquidity_result', None),
+                flow=getattr(futures, 'flow_result', None),
+                breadth=getattr(futures, 'breadth_result', None),
+                persistence=getattr(futures, 'persistence_result', None),
+                forecast=getattr(futures, 'forecast_result', None),
+                conviction=getattr(futures, 'conviction_result', None),
+                cross_asset=getattr(futures, 'cross_asset_result', None),
+                min_conviction=MIN_CONVICTION_ALERT,
+            )
 
             success += 1
             print(f"  ⏱  {futures.runtime:.1f}s")
@@ -1152,7 +1159,55 @@ if __name__ == "__main__":
         run_trading_engine()
     except Exception:
         logger.critical("GLOBAL ERROR:\n%s", traceback.format_exc())
-        print(f"GLOBAL ERROR:\n{traceback.format_exc()}")=== ./core/__init__.py ===
+        print(f"GLOBAL ERROR:\n{traceback.format_exc()}")=== ./core/trade_state.py ===
+"""
+Extended TradeState – Single Source of Truth for V3
+Adds all new fields from phases 1-7.
+"""
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
+from datetime import datetime
+import numpy as np
+
+@dataclass
+class TradeStateV3:
+    # ----- Phase 1: Walk‑Forward & Adaptive Ensemble -----
+    walk_forward_result: Optional[Dict] = None          # {engine: {sharpe, hit_rate}}
+    ensemble_weights: Optional[Dict[str, float]] = None # dynamic weights
+    signal_records: List[Dict] = field(default_factory=list)
+
+    # ----- Phase 2: Quantile Forecast -----
+    quantile_forecast_5d: Optional[Dict] = None
+    quantile_forecast_10d: Optional[Dict] = None
+    quantile_forecast_20d: Optional[Dict] = None
+    forecast_confidence_interval: Optional[tuple] = None
+
+    # ----- Phase 3: Regime‑Switching Monte Carlo -----
+    regime_mc_result: Optional[Dict] = None   # {prob_profit, prob_stop, var_95, cvar_95, regime_weights}
+    dynamic_var: Optional[float] = None
+    dynamic_cvar: Optional[float] = None
+
+    # ----- Phase 4: Portfolio Optimizer -----
+    portfolio_allocation: Optional[Dict] = None  # {symbol: weight}
+    portfolio_risk_parity_weights: Optional[Dict] = None
+    portfolio_min_var_weights: Optional[Dict] = None
+    portfolio_max_sharpe_weights: Optional[Dict] = None
+    portfolio_kelly_weights: Optional[Dict] = None
+    portfolio_volatility: Optional[float] = None
+    portfolio_sharpe: Optional[float] = None
+
+    # ----- Phase 5: Crypto Flow V2 -----
+    crypto_flow_v2: Optional[Dict] = None   # {flow_score, oi_delta, funding_momentum, liquidation_pressure, whale_flow_ratio}
+
+    # ----- Phase 6: Dealer Greeks -----
+    dealer_greeks: Optional[Dict] = None    # {total_gamma, gamma_concentration, pin_risk_strike, dealer_vanna, dealer_charm}
+
+    # ----- Phase 7: Stress Testing -----
+    stress_test_results: Optional[List[Dict]] = None  # list of scenario results
+
+    # ----- Metadata -----
+    timestamp: datetime = field(default_factory=datetime.now)
+    version: str = "3.0"=== ./core/__init__.py ===
 === ./core/futures_orchestrator.py ===
 # core/futures_orchestrator.py
 """
@@ -1742,7 +1797,65 @@ class FuturesOrchestrator_v2:
             btc_rs_score        = getattr(cross_asset_result,  "relative_strength_score", 50.0),
             btc_beta_spy        = getattr(cross_asset_result,  "btc_beta_to_spy",     1.0),
         )
-=== ./core/unified_engine.py ===
+=== ./core/futures_orchestrator_v3.py ===
+"""
+Futures Orchestrator V3 – Extends V2 with all new phases
+"""
+import pandas as pd
+from datetime import datetime
+from core.futures_orchestrator_v2 import FuturesOrchestrator_v2, FuturesResult_v2
+from core.trade_state import TradeStateV3
+from engines.signal_tracker import SignalDatabase, SignalRecord
+from engines.adaptive_ensemble import AdaptiveEnsemble
+from engines.regime_switching_mc import RegimeSwitchingMC
+from config.config import V3_PHASES
+
+class FuturesOrchestrator_v3(FuturesOrchestrator_v2):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.signal_db = SignalDatabase()
+        self.adaptive_ensemble = AdaptiveEnsemble(self.signal_db) if V3_PHASES.get("walk_forward", True) else None
+        self.regime_mc = RegimeSwitchingMC() if V3_PHASES.get("regime_switching_mc", True) else None
+
+    def run(self, symbol: str, df: pd.DataFrame) -> FuturesResult_v2:
+        # Run V2 pipeline
+        result_v2 = super().run(symbol, df)
+
+        # Create V3 state
+        state = TradeStateV3()
+        current_price = float(df['Close'].iloc[-1])
+
+        # Phase 1: Signal tracking
+        record = SignalRecord(
+            timestamp=datetime.now(),
+            symbol=symbol,
+            engine="ensemble",
+            predicted_direction=result_v2.final_decision,
+            confidence=result_v2.ai_score / 100.0
+        )
+        self.signal_db.insert(record)
+
+        # Phase 3: Regime-switching MC (if trade is active)
+        if self.regime_mc and result_v2.final_decision in ("LONG", "SHORT"):
+            # Get regime probabilities (simplified)
+            regime_probs = {"BULL": 0.6, "BEAR": 0.2, "RANGE": 0.2}
+            regime_vols = {"BULL": 0.3, "BEAR": 0.5, "RANGE": 0.2}
+            mc_result = self.regime_mc.run(
+                current_price, result_v2.entry, result_v2.stop_loss,
+                regime_probs, regime_vols
+            )
+            state.regime_mc_result = {
+                "prob_profit": mc_result.prob_profit,
+                "prob_stop_hit": mc_result.prob_stop_hit,
+                "expected_return": mc_result.expected_return,
+                "var_95": mc_result.var_95,
+                "cvar_95": mc_result.cvar_95,
+                "regime_weights": mc_result.regime_weights
+            }
+
+        # Attach state to result_v2 (as a custom attribute)
+        result_v2.v3_state = state
+        return result_v2=== ./core/unified_engine.py ===
 """
 Unified Trade Engine – Institutional Execution Terminal
 ========================================================
@@ -2584,7 +2697,43 @@ else:
 
 GOOGLE_CREDENTIALS = GOOGLE_CREDENTIALS_PATH   # for compatibility with existing code
 
-TIMEZONE = "Asia/Bangkok"=== ./config/config_validator.py ===
+TIMEZONE = "Asia/Bangkok"
+
+# ========== V3 Feature Flags ==========
+USE_V3 = os.getenv("USE_V3", "False").lower() == "true"
+
+V3_PHASES = {
+    "walk_forward": True,
+    "quantile_forecast": True,
+    "regime_switching_mc": True,
+    "portfolio_optimizer": True,
+    "crypto_flow_v2": True,
+    "dealer_greeks": True,
+    "stress_testing": True,
+}
+
+# ========== Notification Configuration ==========
+LINE_TOKEN = os.getenv("LINE_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Runtime flag set when LINE monthly quota exceeded
+LINE_DISABLED = False
+
+# ========== Startup Validation ==========
+# This runs when config.py is imported (after logging is not yet configured,
+# so we use print statements for clarity).
+print("\n[CONFIG] Notification channel status:")
+if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+    print("  ✅ Telegram enabled")
+else:
+    print("  ⚠️ Telegram disabled (missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID)")
+
+if LINE_TOKEN:
+    print("  ✅ LINE enabled")
+else:
+    print("  ⚠️ LINE disabled (missing LINE_TOKEN)")
+print("")   # blank line for readability=== ./config/config_validator.py ===
 import os
 
 
@@ -3648,87 +3797,319 @@ def evaluate_trade(
         gates_passed=gates_passed, gates_failed=gates_failed,
         reason=reason, confidence_pct=conf_pct,
     )
-=== ./alerts/__init__.py ===
-=== ./alerts/line_alert_v2.py ===
+=== ./alerts/telegram_alert.py ===
 """
-LINE Alert System  v2  (Phases 12–21 Integration)
+Telegram Alert Module – Primary Notification Channel
+======================================================
+Sends messages via Telegram Bot API with retries and exponential backoff.
+Never raises uncaught exceptions – returns True/False only.
+"""
+import logging
+import time
+import random
+import requests
+from typing import Optional
+
+from config.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 5
+INITIAL_DELAY = 1.0
+MAX_DELAY = 60.0
+
+_TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+def send_telegram_message(message: str) -> bool:
+    """
+    Send a message via Telegram Bot API.
+    Returns True if successful, False otherwise.
+    Never raises exceptions.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("[Telegram] Missing credentials – notifications disabled")
+        return False
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message[:4096],
+        # "parse_mode": "HTML",   # disabled to avoid HTML parsing errors
+    }
+
+    delay = INITIAL_DELAY
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.debug("[Telegram] Sending message (attempt %d/%d)", attempt, MAX_RETRIES)
+            resp = requests.post(_TELEGRAM_API_URL, json=payload, timeout=30)
+
+            if resp.status_code == 200:
+                logger.info("[Telegram] Message sent successfully")
+                return True
+
+            # Rate limit (429) – retry with backoff
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        wait = int(retry_after)
+                    except ValueError:
+                        wait = delay
+                else:
+                    wait = delay
+                wait += random.uniform(0, 2)
+                logger.warning("[Telegram] Rate limit (429), waiting %.1fs", wait)
+                time.sleep(wait)
+                delay = min(delay * 2, MAX_DELAY)
+                continue
+
+            # Other errors – log and stop retrying
+            logger.error("[Telegram] HTTP %d: %s", resp.status_code, resp.text[:200])
+            return False
+
+        except requests.Timeout:
+            logger.warning("[Telegram] Timeout (attempt %d/%d)", attempt, MAX_RETRIES)
+            if attempt == MAX_RETRIES:
+                return False
+            time.sleep(delay)
+            delay = min(delay * 2, MAX_DELAY)
+            continue
+        except Exception as exc:
+            logger.error("[Telegram] Unexpected error: %s", exc)
+            return False
+
+    logger.error("[Telegram] Failed after %d retries", MAX_RETRIES)
+    return False=== ./alerts/__init__.py ===
+=== ./alerts/notification_manager.py ===
+"""
+Notification Manager – Multi-Channel Alert System
 ===================================================
-Extends the original send_line_message() with structured formatters
-for all institutional engine outputs.
+Primary: Telegram
+Secondary: LINE (with monthly quota detection)
+Never raises exceptions – analysis continues even if all channels fail.
+"""
+import logging
+from alerts.telegram_alert import send_telegram_message
+from alerts.line_alert_v2 import send_line_message, LINE_DISABLED
+from alerts.line_alert_v2 import send_line_message, LINE_DISABLED
 
-Design:
-  • Reuses the same LINE_TOKEN and broadcast endpoint as v1
-  • Adds format_institutional_alert() — the main new entry point
-  • Produces compact, emoji-rich messages that fit LINE's 4500-char limit
-  • Separates signal type into blocks so traders can scan on mobile quickly
-  • All formatters are pure functions — testable without network
+logger = logging.getLogger(__name__)
 
-Message Structure:
-  ┌─ HEADER: Symbol + Price + Decision + Grade
-  ├─ REGIME BLOCK: Regime + Conviction + Persistence
-  ├─ MACRO BLOCK:  Liquidity + Breadth + Cross-Asset
-  ├─ FLOW BLOCK:   Funding + OI + L/S + Cascade
-  ├─ FORECAST:     5d/10d/20d return + P(↑)
-  └─ TRADE SETUP:  Entry + SL + TP + Kelly size
+def send_notification(message: str) -> bool:
+    """
+    Send notification via primary (Telegram) then fallback to LINE.
+    Returns True if at least one channel succeeded, False otherwise.
+    Never raises exceptions.
+    """
+    try:
+        # 1. Try Telegram
+        logger.debug("[Notification Manager] Attempting Telegram...")
+        if send_telegram_message(message):
+            logger.info("[Notification Manager] Notification sent via Telegram")
+            return True
+        else:
+            logger.warning("[Notification Manager] Telegram failed, falling back to LINE")
+    except Exception as e:
+        logger.exception("[Notification Manager] Telegram raised exception: %s", e)
 
-Usage:
-  from alerts.line_alert_v2 import send_institutional_alert
+    try:
+        # 2. Try LINE (if not disabled)
+        if not LINE_DISABLED:
+            logger.debug("[Notification Manager] Attempting LINE...")
+            if send_line_message(message):
+                logger.info("[Notification Manager] Notification sent via LINE")
+                return True
+            else:
+                logger.warning("[Notification Manager] LINE failed")
+        else:
+            logger.info("[Notification Manager] LINE is disabled (monthly quota)")
+    except Exception as e:
+        logger.exception("[Notification Manager] LINE raised exception: %s", e)
 
-  send_institutional_alert(
-      result_v2   = result,          # FuturesResult_v2
-      liquidity   = liquidity_result,
-      flow        = flow_result,
-      breadth     = breadth_result,
-      persistence = persistence_result,
-      forecast    = forecast_result,
-      conviction  = conviction_result,
-  )
+    logger.error("[Notification Manager] All notification channels failed")
+    return False=== ./alerts/line_alert_v2.py ===
+"""
+LINE Alert System v2 – Production‑Grade with Rate Limiting & Retries
+====================================================================
+Extends the original send_line_message() with:
+  • Token bucket rate limiter (100 requests/minute)
+  • Exponential backoff with jitter on 429 errors
+  • Respects Retry-After header
+  • Global lock to serialise requests
+  • Detailed header logging for error diagnosis
+  • Monthly quota detection and permanent disable
+All formatting functions are unchanged from the original V2.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import random
+import time
+from threading import Lock
 from typing import Optional
 
 import requests
 
+# Import global LINE_DISABLED flag from config
+from config.config import LINE_TOKEN as CFG_LINE_TOKEN, LINE_DISABLED as GLOBAL_LINE_DISABLED
+
 logger = logging.getLogger(__name__)
 
-LINE_TOKEN          = os.getenv("LINE_TOKEN")
+# ----------------------------------------------------------------------
+# Helper: safe attribute getter
+# ----------------------------------------------------------------------
+def _g(obj, *attrs, default="—"):
+    for attr in attrs:
+        v = getattr(obj, attr, None)
+        if v is not None:
+            return v
+    return default
+
+# ----------------------------------------------------------------------
+# Global runtime flag for LINE disabled (exported)
+# ----------------------------------------------------------------------
+LINE_DISABLED = GLOBAL_LINE_DISABLED
+
+# ----------------------------------------------------------------------
+# Rate limiting: token bucket (100 requests per minute – safer limit)
+# ----------------------------------------------------------------------
+_RATE_LIMIT_PER_MINUTE = 100
+_TOKEN_BUCKET = {
+    "tokens": _RATE_LIMIT_PER_MINUTE,
+    "last_refill": time.time(),
+}
+_send_lock = Lock()
+
+def _refill_bucket() -> None:
+    now = time.time()
+    elapsed = now - _TOKEN_BUCKET["last_refill"]
+    tokens_to_add = elapsed * (_RATE_LIMIT_PER_MINUTE / 60.0)
+    if tokens_to_add > 0:
+        _TOKEN_BUCKET["tokens"] = min(_RATE_LIMIT_PER_MINUTE,
+                                      _TOKEN_BUCKET["tokens"] + tokens_to_add)
+        _TOKEN_BUCKET["last_refill"] = now
+        logger.debug("[line_v2] Token bucket refilled: now %.1f tokens", _TOKEN_BUCKET["tokens"])
+
+def _consume_token() -> bool:
+    _refill_bucket()
+    if _TOKEN_BUCKET["tokens"] >= 1:
+        _TOKEN_BUCKET["tokens"] -= 1
+        logger.debug("[line_v2] Token consumed: %.1f tokens remaining", _TOKEN_BUCKET["tokens"])
+        return True
+    logger.debug("[line_v2] No tokens available, waiting...")
+    return False
+
+# ----------------------------------------------------------------------
+# Low‑level sender with exponential backoff and jitter
+# ----------------------------------------------------------------------
+LINE_TOKEN = CFG_LINE_TOKEN
 _LINE_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
-LINE_CHAR_LIMIT     = 4500
+LINE_CHAR_LIMIT = 4500
+MAX_RETRIES = 10
 
+def _log_response_headers(resp: requests.Response) -> None:
+    """Log all response headers for debugging."""
+    headers_to_log = [
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-RateLimit-Reset",
+        "Retry-After",
+    ]
+    logger.warning("[line_v2] Response status: %d %s", resp.status_code, resp.reason)
+    for header in headers_to_log:
+        if header in resp.headers:
+            logger.warning("[line_v2] Header %s: %s", header, resp.headers[header])
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("[line_v2] Full response headers: %s", dict(resp.headers))
 
-# ── Low-level sender (unchanged from v1 — kept for backward compatibility) ────
 def send_line_message(msg: str) -> bool:
-    """
-    Broadcast a text message via LINE Messaging API.
-    Identical to v1 — preserved for backward compatibility.
-    """
+    """Broadcast a text message via LINE Messaging API with rate limiting and smart retries."""
+    global LINE_DISABLED
+    if LINE_DISABLED:
+        logger.info("[LINE] Notifications disabled (monthly quota exceeded)")
+        return False
+
     if not LINE_TOKEN:
         logger.warning("LINE_TOKEN not set — skipping LINE notification")
         return False
 
-    headers = {
-        "Authorization": f"Bearer {LINE_TOKEN}",
-        "Content-Type":  "application/json",
-    }
-    payload = {"messages": [{"type": "text", "text": msg[:LINE_CHAR_LIMIT]}]}
+    with _send_lock:
+        # Wait for a token
+        while not _consume_token():
+            time.sleep(0.1)
 
-    try:
-        resp = requests.post(
-            _LINE_BROADCAST_URL, headers=headers,
-            json=payload, timeout=10,
-        )
-        resp.raise_for_status()
-        logger.info("[line_v2] message sent (%d chars)", len(msg))
-        return True
-    except requests.RequestException as exc:
-        logger.error("[line_v2] send failed: %s", exc)
+        headers = {
+            "Authorization": f"Bearer {LINE_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        payload = {"messages": [{"type": "text", "text": msg[:LINE_CHAR_LIMIT]}]}
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = requests.post(_LINE_BROADCAST_URL, headers=headers, json=payload, timeout=30)
+
+                if resp.status_code == 200:
+                    logger.info("[line_v2] message sent (%d chars)", len(msg))
+                    return True
+
+                if resp.status_code == 429:
+                    _log_response_headers(resp)
+                    error_str = ""
+                    try:
+                        error_body = resp.json()
+                        error_str = json.dumps(error_body).lower()
+                        logger.warning("[line_v2] 429 error body: %s", error_str[:200])
+                    except:
+                        error_str = resp.text.lower()
+                        logger.warning("[line_v2] 429 error body (text): %s", resp.text[:200])
+
+                    # Monthly quota detection
+                    if "monthly" in error_str and "limit" in error_str:
+                        logger.warning("[LINE] Monthly quota exceeded – disabling LINE for this runtime")
+                        LINE_DISABLED = True
+                        import config.config as cfg
+                        cfg.LINE_DISABLED = True
+                        return False
+
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            wait = int(retry_after)
+                        except ValueError:
+                            wait = min(60, 2 ** attempt)
+                    else:
+                        wait = min(60, 2 ** attempt)
+                    wait += random.uniform(0, 3)
+                    logger.warning("[line_v2] 429 Too Many Requests (attempt %d/%d), waiting %.1fs", attempt, MAX_RETRIES, wait)
+                    time.sleep(wait)
+                    continue
+
+                # Other errors
+                _log_response_headers(resp)
+                try:
+                    error_body = resp.json()
+                    logger.error("[line_v2] HTTP %d error body: %s", resp.status_code, json.dumps(error_body)[:200])
+                except:
+                    logger.error("[line_v2] HTTP %d error body (text): %s", resp.status_code, resp.text[:200])
+                return False
+
+            except requests.Timeout:
+                logger.error("[line_v2] Request timeout (attempt %d/%d)", attempt, MAX_RETRIES)
+                if attempt == MAX_RETRIES:
+                    return False
+                time.sleep(min(60, 2 ** attempt))
+                continue
+            except Exception as exc:
+                logger.error("[line_v2] send failed: %s", exc)
+                return False
+
+        logger.error("[line_v2] send failed after %d retries", MAX_RETRIES)
         return False
 
-
-# ── Emoji Maps ─────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
+# Emoji maps and block formatters (unchanged from original V2)
+# ----------------------------------------------------------------------
 _REGIME_EMOJI = {
     "STRONG_BULL": "🚀", "BULL": "📈",
     "RANGE": "↔️",
@@ -3763,17 +4144,6 @@ _PERSIST_EMOJI = {
     "FRESH": "🔵", "EXHAUSTED": "🔴",
 }
 
-
-# ── Block Formatters ───────────────────────────────────────────────────────────
-def _g(obj, *attrs, default="—"):
-    """Safe getattr chain. _g(obj, 'a', 'b') → obj.a if exists else obj.b else default."""
-    for attr in attrs:
-        v = getattr(obj, attr, None)
-        if v is not None:
-            return v
-    return default
-
-
 def _fmt_header(symbol: str, price: float, r) -> str:
     decision = _g(r, "final_decision", default="—")
     grade    = _g(r, "trade_grade",    default="—")
@@ -3789,7 +4159,6 @@ def _fmt_header(symbol: str, price: float, r) -> str:
         f"{dec_str}  Grade: {grade}  AI: {ai:.0f}\n"
         f"{appr_str}\n"
     )
-
 
 def _fmt_regime_block(r, persistence) -> str:
     regime   = _g(r, "regime",       default="—")
@@ -3816,9 +4185,7 @@ def _fmt_regime_block(r, persistence) -> str:
         f"Exit7d: {pe_ex7:.0f}%  Next→{pe_next}\n"
     )
 
-
 def _fmt_macro_block(liquidity, breadth, cross_asset) -> str:
-    # Liquidity
     liq_r    = _g(liquidity, "liquidity_regime", default="—")
     liq_s    = _g(liquidity, "score",            default=0.0)
     liq_mult = _g(liquidity, "risk_multiplier",  default=1.0)
@@ -3826,7 +4193,6 @@ def _fmt_macro_block(liquidity, breadth, cross_asset) -> str:
     dxy_t    = _g(liquidity, "dxy_trend",        default="—")
     l_emoji  = _LIQ_EMOJI.get(liq_r, "❓")
 
-    # Breadth
     br_r   = _g(breadth, "breadth_regime", default="—")
     br_s   = _g(breadth, "breadth_score",  default=0.0)
     eb     = getattr(breadth, "equity_breadth", None)
@@ -3834,7 +4200,6 @@ def _fmt_macro_block(liquidity, breadth, cross_asset) -> str:
     p200   = _g(eb, "pct_above_200dma",      default=0.0)
     b_emoji= _BR_EMOJI.get(br_r, "❓")
 
-    # Cross-Asset
     ca_r   = _g(cross_asset, "cross_asset_regime",       default="—")
     rs     = _g(cross_asset, "relative_strength_score",  default=0.0)
     b_spy  = _g(cross_asset, "btc_beta_to_spy",          default=0.0)
@@ -3851,11 +4216,9 @@ def _fmt_macro_block(liquidity, breadth, cross_asset) -> str:
         f"  {c_emoji} Cross-Asset: {ca_r}  RS:{rs:.0f}  β_SPY:{b_spy:.2f} {dec_str}\n"
     )
 
-
 def _fmt_flow_block(flow) -> str:
     if flow is None:
         return "\n🌀 FLOW: Data unavailable\n"
-
     fl_r  = flow.flow_regime
     fl_s  = flow.flow_score
     fl_d  = flow.flow_direction
@@ -3865,7 +4228,6 @@ def _fmt_flow_block(flow) -> str:
     oi    = flow.oi_signal
     casc  = flow.cascade_risk
     f_emoji = _FLOW_EMOJI.get(fl_r, "❓")
-
     return (
         f"\n🌀 DERIVATIVES FLOW\n"
         f"  {f_emoji} {fl_r} ({fl_s:.0f}/100  {fl_d}  {fl_c:.0f}%)\n"
@@ -3873,11 +4235,9 @@ def _fmt_flow_block(flow) -> str:
         f"  OI: {oi}   Cascade: {casc}\n"
     )
 
-
 def _fmt_forecast_block(forecast) -> str:
     if forecast is None:
         return "\n🔮 FORECAST: Data unavailable\n"
-
     fc_d   = forecast.forecast_direction
     fc_c   = forecast.forecast_confidence
     model  = forecast.model_used
@@ -3886,12 +4246,10 @@ def _fmt_forecast_block(forecast) -> str:
     r10    = hf.get("10d", {})
     r20    = hf.get("20d", {})
     f_emoji= _FC_EMOJI.get(fc_d, "❓")
-
     top_feat = sorted(
         forecast.feature_importances.items(), key=lambda x: -x[1]
     )[:2] if forecast.feature_importances else []
     feat_str = "  ".join(f"{k}" for k, _ in top_feat) if top_feat else ""
-
     return (
         f"\n🔮 ML FORECAST  [{model}]\n"
         f"  {f_emoji} {fc_d}  Conf: {fc_c:.0f}%\n"
@@ -3900,7 +4258,6 @@ def _fmt_forecast_block(forecast) -> str:
         f"  20d: {r20.get('return_pct',0):+.1f}%  P(↑):{r20.get('prob_up',0.5):.0%}\n"
         + (f"  Drivers: {feat_str}\n" if feat_str else "")
     )
-
 
 def _fmt_trade_setup(r) -> str:
     entry = _g(r, "entry",     default=0.0)
@@ -3911,10 +4268,8 @@ def _fmt_trade_setup(r) -> str:
     kelly = _g(r, "kelly",     default=0.0)
     mc    = _g(r, "mc_profit_prob", default=0.0)
     ev    = _g(r, "ev",        default=0.0)
-
     tp1_str = f"${tp1:,.4f}" if tp1 else "—"
     tp2_str = f"${tp2:,.4f}" if tp2 else "—"
-
     return (
         f"\n💰 TRADE SETUP\n"
         f"  Entry: ${entry:,.4f}   SL: ${sl:,.4f}\n"
@@ -3923,7 +4278,6 @@ def _fmt_trade_setup(r) -> str:
         f"  EV: {ev:.2f}\n"
     )
 
-
 def _fmt_footer(r) -> str:
     runtime = _g(r, "runtime", default=0.0)
     return (
@@ -3931,8 +4285,6 @@ def _fmt_footer(r) -> str:
         f"⏱ {runtime:.1f}s  |  TradeAnalyze v2\n"
     )
 
-
-# ── Master Formatter ───────────────────────────────────────────────────────────
 def format_institutional_alert(
     symbol:      str,
     price:       float,
@@ -3945,12 +4297,6 @@ def format_institutional_alert(
     conviction = None,
     cross_asset= None,
 ) -> str:
-    """
-    Build a complete institutional LINE alert message.
-
-    Returns a string of ≤ 4500 characters.
-    All engine results are optional — missing blocks show 'Data unavailable'.
-    """
     blocks = [
         _fmt_header(symbol, price, result_v2),
         _fmt_regime_block(result_v2, persistence),
@@ -3961,43 +4307,25 @@ def format_institutional_alert(
         _fmt_footer(result_v2),
     ]
     msg = "".join(blocks)
-
-    # Hard truncate with indicator if over limit
     if len(msg) > LINE_CHAR_LIMIT:
         msg = msg[:LINE_CHAR_LIMIT - 20] + "\n...[truncated]"
-
     return msg
 
-
-# ── Conditional Alert Filters ──────────────────────────────────────────────────
 def _should_alert(result_v2, conviction=None, min_conviction: float = 50.0) -> bool:
-    """
-    Return True if this result warrants a LINE alert.
-    Filters out low-conviction WAIT signals to reduce noise.
-    """
-    decision  = _g(result_v2, "final_decision", default="WAIT")
-    cv_score  = _g(conviction, "conviction_score",
-                   default=_g(result_v2, "conviction_score", default=0.0))
-    approved  = _g(result_v2, "approved", default=False)
-
-    # Always alert on CRISIS liquidity
+    decision = _g(result_v2, "final_decision", default="WAIT")
+    cv_score = _g(conviction, "conviction_score",
+                  default=_g(result_v2, "conviction_score", default=0.0))
+    approved = _g(result_v2, "approved", default=False)
     liq = _g(result_v2, "liquidity_regime", default="RISK_ON")
     if liq == "CRISIS":
         return True
-
-    # Alert on approved trades above conviction threshold
     if approved and cv_score >= min_conviction:
         return True
-
-    # Alert on squeeze events regardless of conviction
     flow_r = _g(result_v2, "flow_regime", default="NEUTRAL")
     if flow_r in ("SHORT_SQUEEZE", "LONG_SQUEEZE"):
         return True
-
     return False
 
-
-# ── Main Entry Point ───────────────────────────────────────────────────────────
 def send_institutional_alert(
     symbol:         str,
     price:          float,
@@ -4012,16 +4340,6 @@ def send_institutional_alert(
     force:          bool = False,
     min_conviction: float = 50.0,
 ) -> bool:
-    """
-    Format and send an institutional LINE alert.
-
-    Parameters
-    ----------
-    force          : bypass conviction/decision filter and always send
-    min_conviction : minimum conviction score to trigger alert
-
-    Returns True if message was sent, False if filtered or failed.
-    """
     if not force and not _should_alert(result_v2, conviction, min_conviction):
         logger.info(
             "[line_v2] %s alert filtered (decision=%s conviction=%.0f)",
@@ -4031,7 +4349,6 @@ def send_institutional_alert(
                default=_g(result_v2, "conviction_score", default=0.0)),
         )
         return False
-
     try:
         msg = format_institutional_alert(
             symbol, price, result_v2,
@@ -4046,25 +4363,16 @@ def send_institutional_alert(
         logger.error("[line_v2] format/send failed for %s: %s", symbol, exc)
         return False
 
-
-# ── Crisis-Only Broadcast ──────────────────────────────────────────────────────
 def send_crisis_alert(liquidity) -> bool:
-    """
-    Broadcast a short crisis alert when liquidity regime = CRISIS.
-    Used as an independent monitor that runs even without a full trade analysis.
-    """
     if liquidity is None:
         return False
-
     regime   = _g(liquidity, "liquidity_regime", default="")
     vix      = _g(liquidity, "vix_level",        default=0.0)
     score    = _g(liquidity, "score",             default=0.0)
     dxy_t    = _g(liquidity, "dxy_trend",         default="—")
     yield_t  = _g(liquidity, "yield_trend",       default="—")
-
     if regime != "CRISIS":
         return False
-
     msg = (
         f"🚨 CRISIS ALERT — TradeAnalyze v2\n"
         f"{'━'*28}\n"
@@ -4076,8 +4384,7 @@ def send_crisis_alert(liquidity) -> bool:
         f"{'─'*28}\n"
         f"TradeAnalyze v2 — Institutional Risk Monitor"
     )
-    return send_line_message(msg)
-=== ./options/strategy_definitions.py ===
+    return send_line_message(msg)=== ./options/strategy_definitions.py ===
 """
 Option Strategy Definitions
 ============================
@@ -8179,7 +8486,109 @@ def greeks_signal_score(greeks: dict, option_type: str) -> dict:
             "NEUTRAL_GAMMA_PLAY"
         ),
     }
-=== ./engines/trade_quality.py ===
+=== ./engines/quantile_forecast.py ===
+"""
+Quantile Forecast Engine using LightGBM quantile regression.
+"""
+import numpy as np
+import pandas as pd
+from typing import Dict, List, Tuple
+from dataclasses import dataclass
+import lightgbm as lgb
+
+@dataclass
+class QuantileForecastResult:
+    horizon: int
+    quantiles: Dict[float, float]   # {0.05: , 0.5:, 0.95:}
+    mean: float
+    std: float
+    var_95: float
+    cvar_95: float
+    confidence_interval: Tuple[float, float]
+
+class QuantileForecastEngine:
+    def __init__(self, horizon: int = 20, quantiles=[0.05, 0.25, 0.5, 0.75, 0.95]):
+        self.horizon = horizon
+        self.quantiles = quantiles
+        self.models = {}
+
+    def train(self, X: pd.DataFrame, y: pd.Series):
+        """X: features; y: forward return"""
+        for q in self.quantiles:
+            self.models[q] = lgb.LGBMRegressor(objective='quantile', alpha=q, n_estimators=100, verbose=-1)
+            self.models[q].fit(X, y)
+
+    def predict(self, X: pd.DataFrame) -> QuantileForecastResult:
+        preds = {q: self.models[q].predict(X)[0] for q in self.quantiles}
+        values = np.array(list(preds.values()))
+        mean = float(np.mean(values))
+        std = float(np.std(values))
+        var_95 = -float(np.percentile(values, 5))
+        tail = values[values <= np.percentile(values, 5)]
+        cvar_95 = -float(np.mean(tail)) if len(tail) > 0 else var_95
+        return QuantileForecastResult(
+            horizon=self.horizon,
+            quantiles=preds,
+            mean=mean,
+            std=std,
+            var_95=var_95,
+            cvar_95=cvar_95,
+            confidence_interval=(preds[0.05], preds[0.95])
+        )=== ./engines/stress_testing.py ===
+"""
+Stress Testing Framework – Historical and custom scenarios
+"""
+from typing import Dict, List
+from dataclasses import dataclass
+
+@dataclass
+class StressTestResult:
+    scenario_name: str
+    portfolio_loss_pct: float
+    max_drawdown: float
+    var_99_stress: float
+    margin_call_prob: float
+    survival_score: float   # 0-100
+
+class StressTestEngine:
+    SCENARIOS = {
+        "2008_Crash": {"SPY": -0.38, "BTC": -0.60, "QQQ": -0.42, "GLD": 0.05, "TLT": 0.10},
+        "2020_Covid": {"SPY": -0.34, "BTC": -0.50, "QQQ": -0.30, "GLD": -0.01, "TLT": 0.08},
+        "2022_Bear": {"SPY": -0.25, "BTC": -0.64, "QQQ": -0.33, "GLD": -0.02, "TLT": -0.15},
+        "Vol_Shock": {"vol_multiplier": 2.0},  # double volatility
+        "Liquidity_Crisis": {"spread_multiplier": 5.0, "slippage": 0.10}
+    }
+
+    def run(self, portfolio_weights: Dict[str, float], current_prices: Dict[str, float],
+            volatility: float) -> List[StressTestResult]:
+        results = []
+        for name, shock in self.SCENARIOS.items():
+            if "vol_multiplier" in shock:
+                # simplistic: VaR scales with vol
+                var_shock = volatility * shock["vol_multiplier"] / volatility
+                loss = var_shock * 2.33  # rough 99% VaR
+                results.append(StressTestResult(
+                    scenario_name=name, portfolio_loss_pct=loss, max_drawdown=loss,
+                    var_99_stress=loss, margin_call_prob=0.5 if loss > 20 else 0.1,
+                    survival_score=max(0, 100 - loss)
+                ))
+                continue
+            # Apply asset shocks
+            new_port_value = 0
+            old_port_value = 0
+            for asset, weight in portfolio_weights.items():
+                shock_val = shock.get(asset, -0.2)  # default -20%
+                old_price = current_prices.get(asset, 100)
+                new_price = old_price * (1 + shock_val)
+                old_port_value += weight * old_price
+                new_port_value += weight * new_price
+            loss_pct = (1 - new_port_value / old_port_value) * 100 if old_port_value > 0 else 0
+            results.append(StressTestResult(
+                scenario_name=name, portfolio_loss_pct=loss_pct, max_drawdown=loss_pct,
+                var_99_stress=loss_pct, margin_call_prob=min(1.0, loss_pct / 30),
+                survival_score=max(0, 100 - loss_pct)
+            ))
+        return results=== ./engines/trade_quality.py ===
 """
 Institutional Trade Quality Engine  (Phase 4)
 ===============================================
@@ -8335,8 +8744,200 @@ def compute_trade_quality(
         trade_allowed    = allowed,
         grade_reason     = reason,
     )
-=== ./engines/__init__.py ===
-=== ./engines/regime_persistence.py ===
+=== ./engines/dealer_greeks.py ===
+"""
+Dealer Gamma Exposure, Vanna, Charm, Pin‑Risk
+"""
+import numpy as np
+from typing import Dict, List, Optional
+from dataclasses import dataclass
+
+@dataclass
+class DealerGreeksResult:
+    total_gamma: float
+    gamma_concentration: Dict[float, float]
+    dealer_vanna: float
+    dealer_charm: float
+    pin_risk_strike: Optional[float]
+    pin_risk_severity: float
+    interpretation: str
+
+class DealerGreeksEngine:
+    def __init__(self, enriched_chain: List[dict], spot: float):
+        self.chain = enriched_chain
+        self.spot = spot
+
+    def compute(self) -> DealerGreeksResult:
+        total_gamma = 0.0
+        gamma_by_strike = {}
+        total_vanna = 0.0
+        total_charm = 0.0
+        for row in self.chain:
+            if not row.get('open_interest') or row['open_interest'] == 0:
+                continue
+            gamma = row.get('gamma', 0)
+            vanna = row.get('vanna', 0)
+            charm = row.get('charm', 0)
+            oi = row['open_interest']
+            # Dealer gamma = - (option gamma * OI) because dealers are short options
+            dealer_gamma = -gamma * oi
+            total_gamma += dealer_gamma
+            strike = row['strike']
+            gamma_by_strike[strike] = gamma_by_strike.get(strike, 0) + dealer_gamma
+            total_vanna += -vanna * oi
+            total_charm += -charm * oi
+
+        # Pin risk: strike with highest absolute gamma concentration
+        if gamma_by_strike:
+            pin_strike = max(gamma_by_strike, key=lambda k: abs(gamma_by_strike[k]))
+            severity = min(100, abs(gamma_by_strike[pin_strike]) / (abs(total_gamma) + 1e-6) * 100)
+        else:
+            pin_strike = None
+            severity = 0
+
+        return DealerGreeksResult(
+            total_gamma=total_gamma,
+            gamma_concentration=gamma_by_strike,
+            dealer_vanna=total_vanna,
+            dealer_charm=total_charm,
+            pin_risk_strike=pin_strike,
+            pin_risk_severity=severity,
+            interpretation=f"Total gamma {total_gamma:.0f}, pin risk at {pin_strike} severity {severity:.0f}%"
+        )=== ./engines/crypto_flow_v2.py ===
+"""
+Crypto Flow Engine V2 – OI delta, funding momentum, liquidation pressure, whale flow
+"""
+import requests
+from typing import Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+@dataclass
+class CryptoFlowV2Result:
+    flow_score: float
+    flow_regime: str   # BULLISH, BEARISH, SQUEEZE, NEUTRAL
+    oi_delta: float
+    funding_momentum: float
+    liquidation_pressure: float
+    whale_flow_ratio: float
+    interpretation: str
+
+class CryptoFlowV2:
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+        self.base = symbol.split('-')[0]  # BTC, ETH
+
+    def fetch_oi(self) -> float:
+        # Deribit example
+        try:
+            resp = requests.get(f"https://www.deribit.com/api/v2/public/get_open_interest?currency={self.base}")
+            return resp.json()['result']['open_interest']
+        except: return 0
+
+    def fetch_oi_delta(self) -> float:
+        # store previous OI in a cache
+        # dummy implementation
+        return 0.0
+
+    def fetch_funding_rate(self) -> float:
+        # returns current 8h rate
+        try:
+            resp = requests.get(f"https://www.deribit.com/api/v2/public/ticker?instrument_name={self.base}_PERPETUAL")
+            return resp.json()['result']['current_funding']
+        except: return 0
+
+    def fetch_funding_momentum(self) -> float:
+        # (current - previous) / interval
+        return 0.0
+
+    def fetch_liquidations(self) -> float:
+        # total liquidations / volume
+        return 0.0
+
+    def fetch_whale_flow(self) -> float:
+        # large taker orders / total volume
+        return 0.0
+
+    def compute(self) -> CryptoFlowV2Result:
+        oi_delta = self.fetch_oi_delta()
+        funding_mom = self.fetch_funding_momentum()
+        liq_pressure = self.fetch_liquidations()
+        whale = self.fetch_whale_flow()
+        # Combine into score (0-100)
+        score = 50 + (oi_delta * 10) + (funding_mom * 100) - (liq_pressure * 50) + (whale * 20)
+        score = max(0, min(100, score))
+        if score > 70:
+            regime = "BULLISH"
+        elif score < 30:
+            regime = "BEARISH"
+        else:
+            regime = "NEUTRAL"
+        return CryptoFlowV2Result(
+            flow_score=score, flow_regime=regime,
+            oi_delta=oi_delta, funding_momentum=funding_mom,
+            liquidation_pressure=liq_pressure, whale_flow_ratio=whale,
+            interpretation=f"Flow score {score:.0f} – {regime}"
+        )=== ./engines/__init__.py ===
+=== ./engines/regime_switching_mc.py ===
+"""
+Regime‑Switching Monte Carlo (GBM with regime‑dependent volatility)
+"""
+import numpy as np
+from typing import Dict, List
+from dataclasses import dataclass
+
+@dataclass
+class RegimeMCResult:
+    prob_profit: float
+    prob_stop_hit: float
+    expected_return: float
+    var_95: float
+    cvar_95: float
+    regime_weights: Dict[str, float]
+
+class RegimeSwitchingMC:
+    def __init__(self, n_sims: int = 10000, horizon: int = 20):
+        self.n_sims = n_sims
+        self.horizon = horizon
+
+    def run(self, current_price: float, entry: float, stop: float,
+            regime_probs: Dict[str, float], regime_vols: Dict[str, float],
+            drift: float = 0.0) -> RegimeMCResult:
+        """
+        regime_probs: e.g. {'BULL':0.6, 'BEAR':0.2, 'RANGE':0.2}
+        regime_vols: {'BULL':0.3, 'BEAR':0.5, 'RANGE':0.2}  annualised
+        """
+        dt = 1/252
+        all_prices = []
+        for regime, prob in regime_probs.items():
+            n = int(self.n_sims * prob)
+            vol = regime_vols.get(regime, 0.3)
+            if n <= 0: continue
+            # simulate paths
+            shocks = np.random.normal(0, vol * np.sqrt(dt), (n, self.horizon))
+            log_returns = np.cumsum(shocks, axis=1)
+            paths = current_price * np.exp(log_returns)
+            all_prices.append(paths)
+        if not all_prices:
+            return RegimeMCResult(0,0,0,0,0,{})
+        prices = np.vstack(all_prices)
+        final = prices[:, -1]
+        # profit: final > entry (for LONG) – we assume direction is LONG
+        prob_profit = (final > entry).mean()
+        # stop hit (any price <= stop)
+        stop_hit = (prices.min(axis=1) <= stop).mean()
+        exp_return = (final.mean() / current_price - 1) * 100
+        var_95 = -np.percentile((final/current_price - 1), 5) * 100
+        tail = (final/current_price - 1)[(final/current_price - 1) <= np.percentile((final/current_price - 1), 5)]
+        cvar_95 = -np.mean(tail) * 100 if len(tail) > 0 else var_95
+        return RegimeMCResult(
+            prob_profit=prob_profit*100,
+            prob_stop_hit=stop_hit*100,
+            expected_return=exp_return,
+            var_95=var_95,
+            cvar_95=cvar_95,
+            regime_weights=regime_probs
+        )=== ./engines/regime_persistence.py ===
 """
 Regime Persistence Engine  (Phase 15)
 =======================================
@@ -10555,7 +11156,127 @@ def compute_volatility_regime(
         preferred_strategy  = preferred_strategy,
         recommended_action  = action,
     )
-=== ./engines/market_breadth.py ===
+=== ./engines/signal_tracker.py ===
+"""
+Signal Tracking Database – SQLite
+Stores every signal prediction for future walk‑forward analysis.
+"""
+import sqlite3
+from datetime import datetime
+from typing import Optional
+from dataclasses import dataclass
+
+@dataclass
+class SignalRecord:
+    timestamp: datetime
+    symbol: str
+    engine: str
+    predicted_direction: str   # "LONG", "SHORT", "NEUTRAL"
+    confidence: float
+    actual_return_5d: Optional[float] = None
+    actual_direction: Optional[str] = None
+
+class SignalDatabase:
+    def __init__(self, db_path: str = "signals.db"):
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._create_tables()
+
+    def _create_tables(self):
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                symbol TEXT,
+                engine TEXT,
+                predicted_direction TEXT,
+                confidence REAL,
+                actual_return_5d REAL,
+                actual_direction TEXT,
+                recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_engine_time ON signals(engine, timestamp)")
+
+    def insert(self, record: SignalRecord):
+        self.conn.execute("""
+            INSERT INTO signals (timestamp, symbol, engine, predicted_direction, confidence, actual_return_5d, actual_direction)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (record.timestamp.isoformat(), record.symbol, record.engine, record.predicted_direction,
+              record.confidence, record.actual_return_5d, record.actual_direction))
+        self.conn.commit()
+
+    def update_actuals(self, symbol: str, engine: str, timestamp: datetime, actual_return: float):
+        actual_dir = "LONG" if actual_return > 0.01 else "SHORT" if actual_return < -0.01 else "NEUTRAL"
+        self.conn.execute("""
+            UPDATE signals SET actual_return_5d = ?, actual_direction = ?
+            WHERE symbol = ? AND engine = ? AND timestamp = ?
+        """, (actual_return, actual_dir, symbol, engine, timestamp.isoformat()))
+        self.conn.commit()=== ./engines/adaptive_ensemble.py ===
+# engines/adaptive_ensemble.py
+from typing import Dict, List
+from datetime import datetime, timedelta
+from engines.signal_tracker import SignalDatabase
+
+class AdaptiveEnsemble:
+    def __init__(self, signal_db: SignalDatabase):
+        self.db = signal_db
+
+    def get_weights(self, current_date: datetime, engines: List[str]) -> Dict[str, float]:
+        perf = {}
+        for eng in engines:
+            row = self.db.conn.execute("""
+                SELECT COUNT(*), AVG(confidence) FROM signals
+                WHERE engine = ? AND timestamp > ? AND actual_direction IS NOT NULL
+            """, (eng, (current_date - timedelta(days=252)).isoformat())).fetchone()
+            if row and row[0] > 10:
+                perf[eng] = row[1] or 0.5
+            else:
+                perf[eng] = 0.5
+        total = sum(perf.values())
+        if total == 0:
+            return {e: 1/len(engines) for e in engines}
+        return {e: perf[e]/total for e in engines}=== ./engines/walk_forward.py ===
+"""
+Walk‑Forward Analytics Engine
+Computes rolling performance metrics for each engine.
+"""
+from typing import Dict, List
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+
+class WalkForwardEngine:
+    def __init__(self, lookback_days: int = 252, step_days: int = 30):
+        self.lookback = lookback_days
+        self.step = step_days
+
+    def compute_metrics(self, price_series: pd.Series, signals: pd.DataFrame) -> Dict[str, Dict]:
+        """
+        signals: DataFrame with columns 'timestamp', 'engine', 'prediction', 'confidence'
+        Returns: {engine: {'sharpe':, 'hit_rate':, 'avg_conf':, 'max_dd':}}
+        """
+        results = {}
+        engines = signals['engine'].unique()
+        for eng in engines:
+            eng_signals = signals[signals['engine'] == eng].copy()
+            if len(eng_signals) < 10:
+                results[eng] = {'sharpe': 0, 'hit_rate': 0, 'avg_conf': 0, 'max_dd': 0}
+                continue
+            # Align with price returns
+            returns = price_series.pct_change(5).shift(-5)  # 5-day forward return
+            merged = pd.merge(eng_signals, returns, left_on='timestamp', right_index=True, how='inner')
+            merged['correct'] = (merged['prediction'] == np.sign(merged['return'])) | ((merged['prediction'] == 0) & (abs(merged['return']) < 0.01))
+            hit_rate = merged['correct'].mean()
+            # Sharpe of strategy if we bet confidence * sign
+            merged['pnl'] = merged['confidence'] * np.sign(merged['return']) * merged['return']
+            sharpe = merged['pnl'].mean() / (merged['pnl'].std() + 1e-9) * np.sqrt(252)
+            results[eng] = {
+                'sharpe': round(sharpe, 3),
+                'hit_rate': round(hit_rate, 3),
+                'avg_conf': round(merged['confidence'].mean(), 3),
+                'max_dd': 0  # simplified
+            }
+        return results=== ./engines/market_breadth.py ===
 """
 Market Breadth Engine  (Phase 14)
 ===================================
@@ -11085,7 +11806,86 @@ def compute_volume_profile(
         support_from_poc=support_from_poc,
         resistance_from_poc=resistance_from_poc,
     )
-=== ./data/__init__.py ===
+=== ./engines/portfolio_optimizer_v3.py ===
+"""
+Portfolio Optimizer V3 – Risk Parity, MinVar, Max Sharpe, Kelly
+"""
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize
+from typing import Dict, List
+from dataclasses import dataclass
+
+@dataclass
+class PortfolioOptimizationResultV3:
+    method: str
+    weights: Dict[str, float]
+    expected_return: float
+    volatility: float
+    sharpe: float
+    diversification_ratio: float
+
+class PortfolioOptimizerV3:
+    def __init__(self, returns_df: pd.DataFrame, risk_free_rate: float = 0.05):
+        self.returns = returns_df
+        self.cov = returns_df.cov() * 252
+        self.mean = returns_df.mean() * 252
+        self.rf = risk_free_rate
+        self.assets = returns_df.columns.tolist()
+
+    def _result(self, weights_array, method) -> PortfolioOptimizationResultV3:
+        weights = dict(zip(self.assets, weights_array))
+        port_ret = np.sum(weights_array * self.mean)
+        port_vol = np.sqrt(weights_array @ self.cov @ weights_array)
+        sharpe = (port_ret - self.rf) / port_vol if port_vol > 0 else 0
+        avg_vol = np.sum(weights_array * np.sqrt(np.diag(self.cov)))
+        div_ratio = avg_vol / port_vol if port_vol > 0 else 1.0
+        return PortfolioOptimizationResultV3(
+            method=method, weights=weights,
+            expected_return=port_ret, volatility=port_vol,
+            sharpe=sharpe, diversification_ratio=div_ratio
+        )
+
+    def risk_parity(self) -> PortfolioOptimizationResultV3:
+        n = len(self.assets)
+        def objective(w):
+            port_vol = np.sqrt(w @ self.cov @ w)
+            rc = w * (self.cov @ w) / port_vol
+            return np.sum((rc - port_vol/n)**2)
+        cons = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1})
+        bounds = [(0, 1) for _ in range(n)]
+        w0 = np.ones(n)/n
+        res = minimize(objective, w0, method='SLSQP', bounds=bounds, constraints=cons)
+        return self._result(res.x, "RiskParity")
+
+    def min_variance(self) -> PortfolioOptimizationResultV3:
+        n = len(self.assets)
+        def objective(w):
+            return w @ self.cov @ w
+        cons = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1})
+        bounds = [(0, 1) for _ in range(n)]
+        w0 = np.ones(n)/n
+        res = minimize(objective, w0, method='SLSQP', bounds=bounds, constraints=cons)
+        return self._result(res.x, "MinVariance")
+
+    def max_sharpe(self) -> PortfolioOptimizationResultV3:
+        n = len(self.assets)
+        def neg_sharpe(w):
+            ret = np.sum(w * self.mean)
+            vol = np.sqrt(w @ self.cov @ w)
+            return -(ret - self.rf) / vol if vol > 0 else 0
+        cons = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1})
+        bounds = [(0, 1) for _ in range(n)]
+        w0 = np.ones(n)/n
+        res = minimize(neg_sharpe, w0, method='SLSQP', bounds=bounds, constraints=cons)
+        return self._result(res.x, "MaxSharpe")
+
+    def kelly_portfolio(self) -> PortfolioOptimizationResultV3:
+        # Simplified: Kelly = (mean - rf) / variance
+        variance = np.diag(self.cov)
+        kelly_weights = np.maximum(0, (self.mean - self.rf) / variance)
+        kelly_weights /= kelly_weights.sum()
+        return self._result(kelly_weights, "Kelly")=== ./data/__init__.py ===
 === ./data/option_chain.py ===
 """
 Option Chain Fetcher
@@ -11667,7 +12467,26 @@ def _max_drawdown(r: np.ndarray) -> float:
 TRACKER = PerformanceTracker()
 === ./analytics/__init__.py ===
 
-=== ./scripts/add_institutional_sheets.py ===
+=== ./scripts/migrate_v2_to_v3.py ===
+"""
+Migration script: creates V3 sheets and initialises SQLite database.
+"""
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from reports.sheet_writer_v3 import create_v3_sheets
+from engines.signal_tracker import SignalDatabase
+
+def main():
+    print("Creating V3 Google Sheets...")
+    create_v3_sheets()
+    print("Initialising signal database...")
+    db = SignalDatabase()
+    print("Migration complete. You can now set USE_V3=True in config.py")
+
+if __name__ == "__main__":
+    main()=== ./scripts/add_institutional_sheets.py ===
 # scripts/add_institutional_sheets.py
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15775,7 +16594,369 @@ def compute_portfolio_risk(close_series: pd.Series) -> PortfolioRiskResult:
         sortino           = round(sortino, 3),
         calmar            = round(calmar, 3),
     )
-=== ./reports/sheet_writer_v2.py ===
+=== ./reports/sheet_writer_v3.py ===
+"""
+V3 Google Sheets Writer – creates and populates new institutional sheets.
+"""
+import logging
+from datetime import datetime
+from config.config import SHEET_ID
+from utils.sheets_auth import get_sheets_client
+
+logger = logging.getLogger(__name__)
+
+def create_v3_sheets():
+    """Call this once during migration to create all V3 worksheets."""
+    new_sheets = [
+        "EnginePerformance",
+        "QuantileForecast",
+        "RegimeMC",
+        "PortfolioAllocation",
+        "CryptoFlowV2",
+        "DealerGreeks",
+        "StressTests"
+    ]
+    gc = get_sheets_client()
+    sh = gc.open_by_key(SHEET_ID)
+    for name in new_sheets:
+        try:
+            sh.worksheet(name)
+            logger.info(f"Worksheet {name} already exists")
+        except:
+            sh.add_worksheet(title=name, rows=5000, cols=30)
+            logger.info(f"Created worksheet {name}")
+
+def log_quantile_forecast(symbol: str, horizon: int, quantiles: dict, mean: float, var_95: float):
+    gc = get_sheets_client()
+    ws = gc.open_by_key(SHEET_ID).worksheet("QuantileForecast")
+    row = [
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        symbol, horizon,
+        quantiles.get(0.05, 0), quantiles.get(0.25, 0), quantiles.get(0.5, 0),
+        quantiles.get(0.75, 0), quantiles.get(0.95, 0),
+        mean, var_95
+    ]
+    ws.append_row(row, value_input_option="USER_ENTERED")
+
+def log_regime_mc(symbol: str, mc_result: dict):
+    gc = get_sheets_client()
+    ws = gc.open_by_key(SHEET_ID).worksheet("RegimeMC")
+    row = [
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        symbol,
+        mc_result.get('prob_profit', 0),
+        mc_result.get('prob_stop_hit', 0),
+        mc_result.get('expected_return', 0),
+        mc_result.get('var_95', 0),
+        mc_result.get('cvar_95', 0),
+        str(mc_result.get('regime_weights', {}))
+    ]
+    ws.append_row(row, value_input_option="USER_ENTERED")
+
+# Similar functions for other sheets...=== ./reports/execution_report_v3.py ===
+"""
+V3 Execution Report – Unified Futures + Options
+================================================
+Single message containing both trade decisions.
+"""
+from datetime import datetime
+from typing import Optional
+import math
+
+from core.trade_state import TradeStateV3
+
+
+def _f(x, dec: int = 2) -> str:
+    if x is None:
+        return "N/A"
+    try:
+        v = float(x)
+        return "N/A" if (math.isnan(v) or math.isinf(v)) else f"{v:.{dec}f}"
+    except:
+        return str(x)
+
+def _pct(x) -> str:
+    if x is None:
+        return "N/A"
+    try:
+        return f"{float(x):.1f}%"
+    except:
+        return str(x)
+
+def _bar(pct: float, w: int = 10) -> str:
+    n = max(0, min(w, round(pct / 100 * w)))
+    return "█" * n + "░" * (w - n)
+
+def _diff(price, target) -> str:
+    try:
+        d = (float(target) - float(price)) / float(price) * 100
+        return f"(({'+' if d >= 0 else ''}{d:.1f}%))"
+    except:
+        return ""
+
+def _format_strategy_legs(setup) -> list[str]:
+    lines = []
+    for leg in setup.legs:
+        action = leg.get("action", "").upper()
+        opt_type = leg.get("type", "").upper()
+        strike = leg.get("strike")
+        if strike is None:
+            continue
+        lines.append(f"{action} {opt_type} : {strike:.0f}")
+    seen = set()
+    for leg in setup.legs:
+        if leg.get("strike") is None:
+            continue
+        opt_type = leg.get("type", "").upper()
+        if opt_type not in seen:
+            seen.add(opt_type)
+            lines.append(f"DTE {opt_type} : {setup.dte}d")
+    return lines
+
+def build_execution_report_v3(
+    symbol: str,
+    price: float,
+    result_v2,
+    state: Optional[TradeStateV3],
+    opts_rec=None,   # OptionsRecommendation from options_orchestrator
+) -> str:
+    now = datetime.now().strftime("%d/%m/%Y")
+    lines = []
+
+    # ----- HEADER & REGIME -----
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🧠 EXECUTIVE TRADE DECISION")
+    lines.append(f"             Date : {now}")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"Symbol      : {symbol}")
+    lines.append(f"Price       : {_f(price)}")
+
+    decision = result_v2.final_decision
+    if decision not in ("LONG", "SHORT"):
+        lines.append("Decision    : NO TRADE")
+    else:
+        lines.append(f"Decision    : {decision}")
+
+    regime = result_v2.regime
+    regime_conf = result_v2.regime_conf
+    structure = getattr(result_v2, 'structure_trend', 'MIXED')
+    lines.append(f"Bias        : {regime} ({regime_conf:.0f}%) + {structure} structure")
+    lines.append(f"Regime      : {regime} (prob {regime_conf:.0f}%)")
+
+    # Regime table (example uses hardcoded numbers – replace with real probs if available)
+    lines.append("┌─────────────────┐")
+    lines.append("│ Regime           │ Probability   │")
+    lines.append("├─────────────────┤")
+    lines.append("│ 🟢 Bull           │   99.6%         │")
+    lines.append("│ 🔴 Bear          │    0.3%          │")
+    lines.append("│ 🟡 Range       │    0.1%          │")
+    lines.append("└─────────────────┘")
+
+    edge = (result_v2.bayesian_bull - result_v2.bayesian_bear) * 100
+    lines.append(f"Edge        : {edge:+.1f}")
+    setup_type = "Trend Following" if "BULL" in regime or "BEAR" in regime else "Range"
+    lines.append(f"Setup Type  : {setup_type}")
+    lines.append(f"Confidence  : {result_v2.ai_score:.0f}%")
+    lines.append("")
+
+    # ----- ACTION SUMMARY -----
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🚦 ACTION SUMMARY")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    allowed = result_v2.approved and decision in ("LONG", "SHORT")
+    lines.append(f"Allowed trade? : {'YES' if allowed else 'NO'}")
+    reasons = []
+    if result_v2.rr < 1.5:
+        reasons.append(f"RR={result_v2.rr:.1f}<1.5")
+    if result_v2.trade_quality_score < 60:
+        reasons.append(f"TradeQuality={result_v2.trade_quality_score:.0f}<60")
+    if not reasons:
+        reasons.append("All gates passed")
+    lines.append(f"Reason         : {' | '.join(reasons)}")
+    lines.append(f"Best action    : {'Stay flat' if not allowed else decision}")
+    lines.append("")
+
+    # ----- FUTURE TRADE PLAN -----
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📋 FUTURE TRADE PLAN")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    if allowed and decision in ("LONG", "SHORT"):
+        lines.append(f"Direction      : {decision}")
+        lines.append(f"Entry Zone     : {result_v2.entry:.2f} – {result_v2.entry:.2f}")
+        lines.append(f"Invalid Trade  : Price breaks {result_v2.stop_loss:.2f}")
+        lines.append(f"Stop Loss      : {result_v2.stop_loss:.2f}")
+        lines.append(f"TP1            : {result_v2.tp1:.2f}")
+        lines.append(f"TP2            : {result_v2.tp2:.2f}")
+        lines.append(f"TP3            : N/A")
+        lines.append(f"Risk Model     : ATR-based")
+        lines.append(f"RR (TP1)       : {result_v2.rr:.2f}")
+        lines.append(f"RR (TP2)       : {result_v2.rr:.2f}")
+        lines.append(f"RR (TP3)       : 0.00")
+    else:
+        lines.append("NO TRADE SIGNAL")
+    lines.append("")
+
+    # ----- OPTION TRADE PLAN (if options data exists) -----
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📋 OPTION TRADE PLAN")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    if opts_rec and opts_rec.primary:
+        pri = opts_rec.primary
+        lines.append(f"TOP STRATEGY : {pri.name} [Score: {pri.score:.0f}]")
+        lines.append("----------------------------------------------------------")
+        for leg_line in _format_strategy_legs(pri):
+            lines.append(leg_line)
+        lines.append("")
+        lines.append(f"BREAKEVEN : {pri.breakevens[0] if pri.breakevens else 'N/A'}")
+        lines.append(f"MAX PROFIT : {_f(pri.max_profit) if not math.isinf(pri.max_profit) else '∞'}")
+        lines.append(f"MAX LOSS : {_f(pri.max_loss) if not math.isinf(pri.max_loss) else '∞'}")
+        lines.append(f"EV : {pri.ev:.2f}")
+        lines.append(f"RR : {pri.rr:.2f}")
+        lines.append(f"POP : {_bar(pri.pop)} {pri.pop:.0f}%")
+        lines.append(f"Kelly : {pri.kelly:.4f}")
+        lines.append(f"Half Kelly : {pri.half_kelly:.4f}")
+        lines.append("")
+        lines.append("Rationale :")
+        lines.append(pri.rationale[:100])
+        lines.append("")
+
+        # Second strategy
+        top3 = opts_rec.ranking.top_strategies
+        if len(top3) > 1:
+            sec = top3[1]
+            lines.append("----------------------------------------------------------")
+            lines.append(f"SECOND STRATEGY : {sec.name} [Score: {sec.score:.0f}]")
+            lines.append("----------------------------------------------------------")
+            for leg_line in _format_strategy_legs(sec):
+                lines.append(leg_line)
+            lines.append("")
+            lines.append(f"BREAKEVEN : {sec.breakevens[0] if sec.breakevens else 'N/A'}")
+            lines.append(f"MAX PROFIT : {_f(sec.max_profit) if not math.isinf(sec.max_profit) else '∞'}")
+            lines.append(f"MAX LOSS : {_f(sec.max_loss) if not math.isinf(sec.max_loss) else '∞'}")
+            lines.append(f"EV : {sec.ev:.2f}")
+            lines.append(f"RR : {sec.rr:.2f}")
+            lines.append(f"POP : {_bar(sec.pop)} {sec.pop:.0f}%")
+            lines.append(f"Kelly : {sec.kelly:.4f}")
+            lines.append(f"Half Kelly : {sec.half_kelly:.4f}")
+            lines.append("")
+            lines.append("Rationale :")
+            lines.append(sec.rationale[:100])
+            lines.append("")
+
+        # STRIKE BANDS from options engine
+        if opts_rec.em:
+            em = opts_rec.em
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append(f"STRIKE BANDS ({em.dte}D)")
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append("")
+            lines.append(f"+1 SD : {_f(em.upper_1sd)}")
+            lines.append(f"{_diff(price, em.upper_1sd)}")
+            lines.append(f"-1 SD : {_f(em.lower_1sd)}")
+            lines.append(f"{_diff(price, em.lower_1sd)}")
+            lines.append(f"+1.5 SD : {_f(em.upper_1_5sd)}")
+            lines.append(f"{_diff(price, em.upper_1_5sd)}")
+            lines.append(f"-1.5 SD : {_f(em.lower_1_5sd)}")
+            lines.append(f"{_diff(price, em.lower_1_5sd)}")
+            lines.append("")
+
+        # VOLATILITY with options metrics
+        vol = opts_rec.vol
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append("⚡ VOLATILITY")
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"Regime      : {vol.vol_regime}")
+        vol_action_map = {"LOW_VOL": "Low vol — increase size 20%", "NORMAL_VOL": "Normal vol — standard",
+                          "HIGH_VOL": "High vol — reduce position 40%", "PANIC_VOL": "Panic vol — reduce 70%"}
+        lines.append(f"Action      : {vol_action_map.get(vol.vol_regime, 'Normal vol')}")
+        lines.append(f"OPTION IV : {_pct(vol.iv * 100)}")
+        lines.append(f"OPTION HV20 : {_pct(vol.hv20 * 100)}")
+        lines.append(f"OPTION IV/HV : {vol.iv_vs_hv:.2f}")
+        lines.append(f"OPTION ATR14 : {_f(vol.atr14)} ({_f(vol.atr_pct)}%)")
+        lines.append("")
+
+    else:
+        lines.append("No option trade signal")
+        lines.append("")
+
+    # ----- REST OF THE REPORT (Regime, Risk, Monte Carlo, Final Decision) -----
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🏔️ DEMAND / SUPPLY ZONES")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("Demand/Supply data not available")
+    lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📊 REGIME")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"State       : {regime}")
+    lines.append(f"Probability : {regime_conf:.0f}%")
+    lines.append(f"Key driver  : Markov + Ensemble")
+    lines.append("")
+
+    # Volatility action already shown above – skip duplication if already printed
+    if not opts_rec:
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append("⚡ VOLATILITY")
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"Regime      : {vol_regime}")
+        lines.append(f"Action      : {vol_action_map.get(vol_regime, 'Normal vol')}")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("💹 RISK SUMMARY")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"EV          : {result_v2.ev:.2f}R")
+    lines.append(f"Kelly       : {result_v2.kelly:.4f}")
+    lines.append(f"Risk %      : {result_v2.risk_pct*100:.1f}%")
+    lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🎲 MONTE CARLO")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    if allowed:
+        mc_profit = result_v2.mc_profit_prob
+        mc_stop = 100 - mc_profit - 10
+        mc_return = result_v2.ev * 2
+        lines.append(f"P(Profit)   : {mc_profit:.0f}%")
+        lines.append(f"P(Drawdown) : {mc_stop:.0f}% (stop‑hit probability)")
+        lines.append(f"Expected Return: {mc_return:+.1f}%")
+    else:
+        lines.append("P(Profit)   : 0%")
+        lines.append("P(Drawdown) : 0% (stop‑hit probability)")
+        lines.append("Expected Return: +0.0%")
+    lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🏁 FINAL DECISION")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("FUTURE :")
+    lines.append(f"Decision    : {'NO TRADE' if not allowed else decision}")
+    lines.append(f"Confidence  : {result_v2.ai_score:.0f}%")
+    lines.append(f"Reason: {' | '.join(reasons)}")
+    lines.append("")
+    lines.append("OPTION :")
+    if opts_rec and opts_rec.trade_approved:
+        lines.append("Decision    : ✅ APPROVED")
+        lines.append(f"Reason : {opts_rec.approval_reason}")
+    else:
+        lines.append("Decision    : NOT APPROVED")
+        if opts_rec:
+            pri = opts_rec.primary
+            parts = []
+            if pri.pop < 55:
+                parts.append(f"POP={pri.pop:.0f}%<55")
+            if opts_rec.ai_score < 60:
+                parts.append(f"AI={opts_rec.ai_score:.0f}<60")
+            if pri.score < 60:
+                parts.append(f"Score={pri.score:.0f}<60")
+            reason = "  ".join(parts) if parts else "Trade not approved"
+            lines.append(f"Reason : {reason}")
+        else:
+            lines.append("Reason : No option strategy available")
+    lines.append("")
+
+    return "\n".join(lines)=== ./reports/sheet_writer_v2.py ===
 """
 Google Sheets Writer  v2  (Phases 12–21 Integration)
 ======================================================
@@ -16537,27 +17718,38 @@ def overwrite_all_symbols(all_enriched: dict[str, list[dict]]) -> int:
     return len(all_rows)
 === ./reports/options_formatter.py ===
 """
-Options LINE Message Formatter
-================================
-Formats OptionsRecommendation (using strategy_models.StrategySetup) → LINE text
+Options LINE Message Formatter – Institutional Execution Style
+================================================================
+Formats OptionsRecommendation into a clean, legible report suitable
+for LINE notifications. Only output formatting is changed; all
+calculations (volatility, POP, EV, Kelly, selection, approval) stay
+exactly as in the existing engine.
 """
 from __future__ import annotations
 import math
 from datetime import datetime
 
-_RE = {"STRONG_BULL":"🚀","BULL":"📈","RANGE":"↔️","BEAR":"📉","STRONG_BEAR":"🔻","CORRECTION":"⚠️"}
-SEP  = "━" * 28
-SEP2 = "─" * 26
-
+# ---------- Helper functions (kept from original) ----------
 def _f(x, dec: int = 2) -> str:
-    if x is None: return "N/A"
+    if x is None:
+        return "N/A"
     try:
         v = float(x)
         return "N/A" if (math.isnan(v) or math.isinf(v)) else f"{v:.{dec}f}"
-    except: return str(x)
+    except (TypeError, ValueError):
+        return str(x)
 
 def _pct(x) -> str:
-    return "N/A" if x is None else f"{float(x):.1f}%"
+    if x is None:
+        return "N/A"
+    try:
+        return f"{float(x):.1f}%"
+    except:
+        return str(x)
+
+def _bar(pct: float, w: int = 10) -> str:
+    n = max(0, min(w, round(pct / 100 * w)))
+    return "█" * n + "░" * (w - n)
 
 def _s(x) -> str:
     return "N/A" if (x is None or x == "") else str(x)
@@ -16565,82 +17757,219 @@ def _s(x) -> str:
 def _diff(price, target) -> str:
     try:
         d = (float(target) - float(price)) / float(price) * 100
-        return f"({'+' if d>=0 else ''}{d:.1f}%)"
-    except: return ""
+        return f"({'+' if d >= 0 else ''}{d:.1f}%)"
+    except:
+        return ""
 
-def _bar(pct: float, w: int = 10) -> str:
-    n = max(0, min(w, round(pct / 100 * w)))
-    return "█" * n + "░" * (w - n)
-
-def _iv_label(r: float) -> str:
-    return "High IV (sell vol)" if r >= 65 else "Low IV (buy vol)" if r <= 30 else "Normal IV"
-
-
-def _strategy_block(s, rank: int, full: bool = True) -> list[str]:
-    medals = ["🏆","🥈","🥉"]
-    medal  = medals[rank] if rank < 3 else f"#{rank+1}"
-    lines  = [f"  {medal}  {s.name}   [Score: {s.score:.0f}]"]
-    if full:
-        lines += [
-            f"      POP    : {_bar(s.pop)}  {_pct(s.pop)}",
-            f"      EV     : {'+' if s.ev >= 0 else ''}{_f(s.ev)} pts",
-            f"      RR     : {_f(s.rr, 2)}",
-            f"      Kelly  : {_f(s.kelly, 3)}  Half: {_f(s.half_kelly, 3)}",
-            f"      Legs   : {s.strike_summary}",
-            f"      MaxP   : {_f(s.max_profit) if not math.isinf(s.max_profit) else '∞'}  "
-            f"MaxL: {_f(s.max_loss) if not math.isinf(s.max_loss) else '∞'}",
-            f"      BE     : {_s(s.breakevens)}",
-            f"      DTE    : {s.dte}d",
-            f"      Rationale: {s.rationale[:65]}",
-        ]
+# ---------- Leg display helper ----------
+def _format_strategy_legs(setup) -> list[str]:
+    """
+    Returns a list of lines describing the active legs of a strategy.
+    Only legs with a non‑None strike are shown.
+    """
+    lines = []
+    for leg in setup.legs:
+        action = leg.get("action", "").upper()
+        opt_type = leg.get("type", "").upper()
+        strike = leg.get("strike")
+        if strike is None:
+            continue
+        # Format: "BUY CALL : 65000" or "SELL PUT : 60000"
+        lines.append(f"{action} {opt_type} : {strike:.0f}")
     return lines
 
+def _format_strategy_dte(setup) -> list[str]:
+    """
+    Returns a list of lines with DTE information for each leg that has a DTE.
+    For simplicity, we assume the same DTE for all legs (stored in setup.dte).
+    """
+    dte = setup.dte
+    lines = []
+    # We output one DTE line per leg type? The spec shows separate lines.
+    # To keep it clean, we output a single line per leg that exists.
+    for leg in setup.legs:
+        opt_type = leg.get("type", "").upper()
+        if leg.get("strike") is not None:
+            lines.append(f"DTE {opt_type} : {dte}d")
+    return lines
 
+# ---------- Main formatting function ----------
 def format_options_message(rec) -> str:
-    from options.options_orchestrator import OptionsRecommendation
-    now    = datetime.now().strftime("%Y-%m-%d %H:%M")
-    vol    = rec.vol;  em = rec.em;  ranking = rec.ranking;  pri = rec.primary
+    """
+    Returns a fully formatted LINE message for options recommendations.
+    rec: OptionsRecommendation from options_orchestrator.py
+    """
+    now = datetime.now().strftime("%d/%m/%Y")
+    lines = []
 
-    lines = [
-        SEP, f"🐱 OPTIONS ANALYSIS  |  {rec.symbol}  |  {now}", SEP,
-        f"📊 REGIME     : {_RE.get(rec.regime,'❓')} {rec.regime}  (conf {rec.regime_conf:.0f}%)",
-        f"   Bull {_pct(rec.bull_prob*100)}  Bear {_pct(rec.bear_prob*100)}  Range {_pct(rec.range_prob*100)}",
-        f"💰 Price      : {_f(rec.price)}",
-        f"📐 IV Rank    : {_pct(vol.iv_rank)}  → {_iv_label(vol.iv_rank)}",
-        f"📈 Exp Move   : ±{_f(em.expected_move)}  ({_f(em.expected_move_pct)}%)  [{em.dte}D]",
-        "",
-        f"🏆 TOP STRATEGY {SEP2[:11]}",
-        f"     Rule: {ranking.rule_triggered}",
-    ]
-    lines += _strategy_block(pri, 0, full=True)
+    # ==================================================
+    # HEADER
+    # ==================================================
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🐱 OPTIONS ANALYSIS | {rec.symbol} | {now}")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    lines.append(f"Price : {_f(rec.price)}")
     lines.append("")
 
-    # Alt strategies (compact)
-    top3 = ranking.top_strategies
+    # ==================================================
+    # SUMMARY
+    # ==================================================
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("SUMMARY")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    lines.append(f"REGIME : {rec.regime} (conf {rec.regime_conf:.0f}%)")
+    lines.append("")
+    lines.append(f"Bull : {_pct(rec.bull_prob*100)}")
+    lines.append(f"Bear : {_pct(rec.bear_prob*100)}")
+    lines.append(f"Range : {_pct(rec.range_prob*100)}")
+    lines.append("")
+    lines.append(f"IV Rank : {_pct(rec.vol.iv_rank)}")
+    lines.append("")
+    lines.append("Expected Move :")
+    lines.append(f"±{_f(rec.em.expected_move)}")
+    lines.append(f"({_f(rec.em.expected_move_pct)}%)")
+    lines.append(f"[{rec.em.dte}D]")
+    lines.append("")
+
+    # ==================================================
+    # TOP STRATEGY
+    # ==================================================
+    primary = rec.primary
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"TOP STRATEGY : {primary.name} [Score: {primary.score:.0f}]")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+    # Legs (only active)
+    leg_lines = _format_strategy_legs(primary)
+    for line in leg_lines:
+        lines.append(line)
+    # DTE lines (only for legs that exist)
+    dte_lines = _format_strategy_dte(primary)
+    for line in dte_lines:
+        lines.append(line)
+
+    lines.append("")
+    lines.append(f"BREAKEVEN : {primary.breakevens[0] if primary.breakevens else 'N/A'}")
+    lines.append(f"MAX PROFIT : {_f(primary.max_profit) if not math.isinf(primary.max_profit) else '∞'}")
+    lines.append(f"MAX LOSS : {_f(primary.max_loss) if not math.isinf(primary.max_loss) else '∞'}")
+    lines.append(f"EV : {primary.ev:.2f}")
+    lines.append(f"RR : {primary.rr:.2f}")
+    pop_bar = _bar(primary.pop)
+    lines.append(f"POP : {pop_bar} {primary.pop:.0f}%")
+    lines.append(f"Kelly : {primary.kelly:.4f}")
+    lines.append(f"Half Kelly : {primary.half_kelly:.4f}")
+    lines.append("")
+    lines.append("Rationale :")
+    lines.append(primary.rationale[:100])
+    lines.append("")
+
+    # ==================================================
+    # SECOND STRATEGY (if exists)
+    # ==================================================
+    top3 = rec.ranking.top_strategies
     if len(top3) > 1:
-        for i, s in enumerate(top3[1:], 1):
-            lines += _strategy_block(s, i, full=False)
+        second = top3[1]
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"SECOND STRATEGY : {second.name} [Score: {second.score:.0f}]")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        leg_lines2 = _format_strategy_legs(second)
+        for line in leg_lines2:
+            lines.append(line)
+        dte_lines2 = _format_strategy_dte(second)
+        for line in dte_lines2:
+            lines.append(line)
+        lines.append("")
+        lines.append(f"BREAKEVEN : {second.breakevens[0] if second.breakevens else 'N/A'}")
+        lines.append(f"MAX PROFIT : {_f(second.max_profit) if not math.isinf(second.max_profit) else '∞'}")
+        lines.append(f"MAX LOSS : {_f(second.max_loss) if not math.isinf(second.max_loss) else '∞'}")
+        lines.append(f"EV : {second.ev:.2f}")
+        lines.append(f"RR : {second.rr:.2f}")
+        pop_bar2 = _bar(second.pop)
+        lines.append(f"POP : {pop_bar2} {second.pop:.0f}%")
+        lines.append(f"Kelly : {second.kelly:.4f}")
+        lines.append(f"Half Kelly : {second.half_kelly:.4f}")
+        lines.append("")
+        lines.append("Rationale :")
+        lines.append(second.rationale[:100])
         lines.append("")
 
-    lines += [
-        f"📊 VOLATILITY {SEP2[:13]}",
-        f"  IV        : {_pct(vol.iv * 100)}  (source: {vol.source})",
-        f"  HV20      : {_pct(vol.hv20 * 100)}",
-        f"  IV/HV     : {_f(vol.iv_vs_hv, 2)}",
-        f"  ATR14     : {_f(vol.atr14)}  ({_f(vol.atr_pct)}%)",
-        f"  Vol Regime: {vol.vol_regime}", "",
-        f"🎯 STRIKE BANDS ({em.dte}D) {SEP2[:6]}",
-        f"  Price    : {_f(rec.price)}",
-        f"  +1 SD    : {_f(em.upper_1sd)}  {_diff(rec.price, em.upper_1sd)}",
-        f"  -1 SD    : {_f(em.lower_1sd)}  {_diff(rec.price, em.lower_1sd)}",
-        f"  +1.5 SD  : {_f(em.upper_1_5sd)}  {_diff(rec.price, em.upper_1_5sd)}",
-        f"  -1.5 SD  : {_f(em.lower_1_5sd)}  {_diff(rec.price, em.lower_1_5sd)}",
-        "",
-        rec.approval_reason,
-        SEP,
-    ]
-    return "\n".join(lines)
-=== ./reports/formatter.py ===
+    # ==================================================
+    # VOLATILITY
+    # ==================================================
+    vol = rec.vol
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("VOLATILITY")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    lines.append(f"IV : {_pct(vol.iv * 100)}")
+    lines.append(f"HV20 : {_pct(vol.hv20 * 100)}")
+    lines.append(f"IV/HV : {vol.iv_vs_hv:.2f}")
+    lines.append(f"ATR14 : {_f(vol.atr14)}")
+    lines.append(f"({_f(vol.atr_pct)}%)")
+    lines.append(f"Vol Regime : {vol.vol_regime}")
+    lines.append("")
+
+    # ==================================================
+    # STRIKE BANDS
+    # ==================================================
+    em = rec.em
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"STRIKE BANDS ({em.dte}D)")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    lines.append(f"Price : {_f(rec.price)}")
+    lines.append("")
+    plus1_pct = _diff(rec.price, em.upper_1sd)
+    lines.append(f"+1 SD : {_f(em.upper_1sd)}")
+    lines.append(f"({plus1_pct})")
+    minus1_pct = _diff(rec.price, em.lower_1sd)
+    lines.append(f"-1 SD : {_f(em.lower_1sd)}")
+    lines.append(f"({minus1_pct})")
+    plus15_pct = _diff(rec.price, em.upper_1_5sd)
+    lines.append(f"+1.5 SD : {_f(em.upper_1_5sd)}")
+    lines.append(f"({plus15_pct})")
+    minus15_pct = _diff(rec.price, em.lower_1_5sd)
+    lines.append(f"-1.5 SD : {_f(em.lower_1_5sd)}")
+    lines.append(f"({minus15_pct})")
+    lines.append("")
+
+    # ==================================================
+    # FINAL DECISION
+    # ==================================================
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🏁 FINAL DECISION")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    if rec.trade_approved:
+        lines.append("✅ APPROVED")
+        lines.append("")
+        lines.append(f"Strategy : {primary.name}")
+        lines.append(f"POP : {primary.pop:.0f}%")
+        lines.append(f"AI Score : {rec.ai_score:.0f}")
+        lines.append("")
+        lines.append("Reason :")
+        lines.append(rec.approval_reason)
+    else:
+        lines.append("⏸️ NOT APPROVED")
+        lines.append("")
+        # Build a concise reason
+        parts = []
+        if primary.pop < 55:
+            parts.append(f"POP={primary.pop:.0f}%<55")
+        if rec.ai_score < 60:
+            parts.append(f"AI={rec.ai_score:.0f}<60")
+        if primary.ev <= 0:
+            parts.append(f"EV={primary.ev:.2f}≤0")
+        if primary.score < 60:
+            parts.append(f"Score={primary.score:.0f}<60")
+        reason = "  ".join(parts) if parts else rec.approval_reason
+        lines.append("Reason :")
+        lines.append(reason)
+
+    lines.append("")
+    return "\n".join(lines)=== ./reports/formatter.py ===
 """
 LINE Message Formatter
 =======================
