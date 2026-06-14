@@ -218,9 +218,9 @@ def build_execution_report_v3(
             lines.append(SEP)
             lines.append(f"STRIKE BANDS ({em.dte}D)")
             lines.append(SEP)
+            lines.append(f"+1.5SD : {_f(em.upper_1_5sd)} {_diff(price, em.upper_1_5sd)}")
             lines.append(f"+1SD   : {_f(em.upper_1sd)} {_diff(price, em.upper_1sd)}")
             lines.append(f"-1SD   : {_f(em.lower_1sd)} {_diff(price, em.lower_1sd)}")
-            lines.append(f"+1.5SD : {_f(em.upper_1_5sd)} {_diff(price, em.upper_1_5sd)}")
             lines.append(f"-1.5SD : {_f(em.lower_1_5sd)} {_diff(price, em.lower_1_5sd)}")
             lines.append("")
 

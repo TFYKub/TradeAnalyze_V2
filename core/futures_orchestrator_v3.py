@@ -1,3 +1,4 @@
+# core/futures_orchestrator_v3.py
 """
 Futures Orchestrator V3 – Extends V2 with all new phases
 """
@@ -37,7 +38,7 @@ class FuturesOrchestrator_v3(FuturesOrchestrator_v2):
 
         # Phase 3: Regime-switching MC (if trade is active)
         if self.regime_mc and result_v2.final_decision in ("LONG", "SHORT"):
-            # Get regime probabilities (simplified)
+            # Get regime probabilities (simplified – replace with actual from Markov)
             regime_probs = {"BULL": 0.6, "BEAR": 0.2, "RANGE": 0.2}
             regime_vols = {"BULL": 0.3, "BEAR": 0.5, "RANGE": 0.2}
             mc_result = self.regime_mc.run(

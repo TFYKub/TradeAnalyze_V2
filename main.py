@@ -1,7 +1,8 @@
+# main.py – full file (as in your codebase, verified)
 """
 TradeAnalyze — Main Entry Point  (v2 — full institutional)
 =============================================================
-Uses FuturesOrchestrator_v2 exclusively.
+Uses FuturesOrchestrator_v2/v3 exclusively.
 All LINE messages go through line_alert_v2 (which exports send_line_message).
 """
 import time
@@ -44,7 +45,7 @@ else:
 
 MIN_CONVICTION_ALERT = 60.0
 
-# ---------- Helper to build trade signal dict (unchanged) ----------
+# ---------- Helper to build trade signal dict ----------
 def _build_trade_signal_dict(symbol, futures, asset_type):
     return {
         "symbol": symbol, "regime": futures.regime, "price": futures.price,
@@ -62,7 +63,7 @@ def _build_trade_signal_dict(symbol, futures, asset_type):
         "avg_gamma": None, "fast_decay_pct": None, "asset_type": asset_type,
     }
 
-# ---------- Crypto extras (unchanged) ----------
+# ---------- Crypto extras ----------
 def _run_crypto_extras(symbol: str, price: float) -> str:
     lines = ["", "━"*28, "🔐 CRYPTO INSTITUTIONAL DATA", "━"*28]
     try:
@@ -126,7 +127,7 @@ def run_trading_engine() -> None:
                   f"Grade={futures.trade_grade}  AI={futures.ai_score:.0f}  "
                   f"RR={futures.rr:.2f}  MC={futures.mc_profit_prob:.0f}%")
 
-            # Write sheets (unchanged)
+            # Write sheets
             sig_dict = _build_trade_signal_dict(symbol, futures, asset_type)
             log_trade_signals(symbol, [sig_dict], [{"bull":0,"bear":0,"sideway":0}])
             write_all_institutional(
@@ -140,7 +141,7 @@ def run_trading_engine() -> None:
                 cross_asset=getattr(futures, 'cross_asset_result', None),
             )
 
-            # ---- Option Chain & Options Analysis (merged into main report) ----
+            # Option Chain & Options Analysis
             print(f"  ⚙️  Option chain...")
             enriched_chain = []
             opts_rec = None
@@ -180,7 +181,6 @@ def run_trading_engine() -> None:
                     enriched_chain=enriched_chain,
                 )
                 write_options_analysis(opts_rec)
-                # DO NOT send separate message – will be merged into main report
                 print(f"  📊 Options: {opts_rec.primary.name}  "
                       f"score={opts_rec.primary.score:.0f}  "
                       f"EV={opts_rec.primary.ev:.1f}  "
@@ -190,7 +190,7 @@ def run_trading_engine() -> None:
                 logger.error("[%s] Options analysis: %s", symbol, exc)
                 print(f"  ⚠️  Options: {exc}")
 
-            # ---- Crypto extras (unchanged) ----
+            # Crypto extras
             if asset_type == "crypto":
                 try:
                     crypto_msg = _run_crypto_extras(symbol, price)
@@ -199,20 +199,18 @@ def run_trading_engine() -> None:
                 except Exception as exc:
                     print(f"  ⚠️  Crypto extras: {exc}")
 
-            # ---- Build unified execution report (futures + options) ----
+            # Unified execution report (futures + options)
             if USE_V3:
                 v3_state = getattr(futures, 'v3_state', None)
-                # Pass opts_rec to the report builder
                 decision_report = report_builder(symbol, price, futures, v3_state, opts_rec)
             else:
                 decision_report = futures.report_text
 
-            # Truncate if needed
             msg = decision_report[:4490] + "\n…" if len(decision_report) > 4500 else decision_report
             send_notification(msg)
             print(f"  📱 Unified execution report → Notification sent")
 
-            # Institutional alert (unchanged)
+            # Institutional alert
             send_institutional_alert(
                 symbol=symbol, price=price, result_v2=futures,
                 liquidity=getattr(futures, 'liquidity_result', None),

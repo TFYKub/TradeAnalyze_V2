@@ -29,7 +29,7 @@ GOOGLE_CREDENTIALS = GOOGLE_CREDENTIALS_PATH   # for compatibility with existing
 TIMEZONE = "Asia/Bangkok"
 
 # ========== V3 Feature Flags ==========
-USE_V3 = os.getenv("USE_V3", "False").lower() == "true"
+USE_V3 = True   # ← switch to True
 
 V3_PHASES = {
     "walk_forward": True,
