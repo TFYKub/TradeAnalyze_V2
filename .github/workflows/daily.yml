@@ -2,7 +2,7 @@ name: TradeAnalyze Daily Run
 
 on:
   schedule:
-    - cron: "0 0 * * *"   # 07:00 Bangkok
+    - cron: "0 0 * * *"   # 07:00 Bangkok (UTC+7)
   workflow_dispatch:
 
 jobs:
@@ -16,7 +16,10 @@ jobs:
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
       USE_V3: true                # 👈 Run V3 with all institutional upgrades
-      # To run V2 instead, set USE_V3: false or remove this line
+      # Optional: override specific phases if needed
+      # V3_PHASES_WALK_FORWARD: true
+      # V3_PHASES_QUANTILE_FORECAST: true
+      # etc.
 
     steps:
 
@@ -37,6 +40,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Initialise signal database (V3)
+        run: |
+          python -c "from engines.signal_tracker import SignalDatabase; SignalDatabase()"
 
       - name: Debug
         run: |
