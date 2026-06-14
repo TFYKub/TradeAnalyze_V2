@@ -17,14 +17,8 @@ jobs:
       LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-
-
       USE_V3: true                # 👈 Run V3 with all institutional upgrades
-      # Optional: override specific phases if needed
-      # V3_PHASES_WALK_FORWARD: true
-      # V3_PHASES_QUANTILE_FORECAST: true
-      # etc.
+      PYTHONUNBUFFERED: 1        # Show print statements immediately
 
     steps:
 
@@ -37,20 +31,48 @@ jobs:
 
       - name: Check Secrets
         run: |
-          test -n "$SHEET_ID"
-          test -n "$GOOGLE_CREDENTIALS"
-          test -n "$LINE_TOKEN"
+          test -n "$SHEET_ID" || { echo "Missing SHEET_ID"; exit 1; }
+          test -n "$GOOGLE_CREDENTIALS" || { echo "Missing GOOGLE_CREDENTIALS"; exit 1; }
+          test -n "$LINE_TOKEN" || { echo "Missing LINE_TOKEN"; exit 1; }
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "⚠️ requirements.txt not found – installing minimal V3 dependencies"
+            pip install pandas numpy yfinance scipy hmmlearn scikit-learn xgboost lightgbm requests gspread google-auth python-dotenv
+          fi
+
+      - name: Verify critical imports
+        run: |
+          python -c "
+import sys
+missing = []
+for pkg in ['pandas', 'numpy', 'yfinance', 'scipy', 'hmmlearn', 'xgboost', 'lightgbm', 'gspread', 'google.auth']:
+    try:
+        __import__(pkg)
+    except ImportError:
+        missing.append(pkg)
+if missing:
+    print(f'Missing packages: {missing}')
+    sys.exit(1)
+print('✅ All critical imports OK')
+"
 
       - name: Initialise signal database (V3)
         run: |
-          python -c "from engines.signal_tracker import SignalDatabase; SignalDatabase()"
+          python -c "
+from engines.signal_tracker import SignalDatabase
+try:
+    SignalDatabase()
+    print('✅ Database initialised')
+except Exception as e:
+    print(f'⚠️ Database init warning (may already exist): {e}')
+"
 
-      - name: Debug
+      - name: Debug environment
         run: |
           echo "===== START ====="
           date -u
@@ -60,7 +82,13 @@ jobs:
 
       - name: Run TradeAnalyze
         run: |
-          python main.py | tee trade.log
+          python main.py 2>&1 | tee trade.log
+          exit_code=${PIPESTATUS[0]}
+          if [ $exit_code -ne 0 ]; then
+            echo "❌ TradeAnalyze failed with exit code $exit_code"
+            tail -50 trade.log
+            exit $exit_code
+          fi
 
       - name: Upload Log
         if: always()
