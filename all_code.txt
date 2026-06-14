@@ -914,10 +914,11 @@ def compute_risk_budget(
         active_positions     = len(positions),
     )
 === ./main.py ===
+# main.py – full file (as in your codebase, verified)
 """
 TradeAnalyze — Main Entry Point  (v2 — full institutional)
 =============================================================
-Uses FuturesOrchestrator_v2 exclusively.
+Uses FuturesOrchestrator_v2/v3 exclusively.
 All LINE messages go through line_alert_v2 (which exports send_line_message).
 """
 import time
@@ -960,7 +961,7 @@ else:
 
 MIN_CONVICTION_ALERT = 60.0
 
-# ---------- Helper to build trade signal dict (unchanged) ----------
+# ---------- Helper to build trade signal dict ----------
 def _build_trade_signal_dict(symbol, futures, asset_type):
     return {
         "symbol": symbol, "regime": futures.regime, "price": futures.price,
@@ -978,7 +979,7 @@ def _build_trade_signal_dict(symbol, futures, asset_type):
         "avg_gamma": None, "fast_decay_pct": None, "asset_type": asset_type,
     }
 
-# ---------- Crypto extras (unchanged) ----------
+# ---------- Crypto extras ----------
 def _run_crypto_extras(symbol: str, price: float) -> str:
     lines = ["", "━"*28, "🔐 CRYPTO INSTITUTIONAL DATA", "━"*28]
     try:
@@ -1042,7 +1043,7 @@ def run_trading_engine() -> None:
                   f"Grade={futures.trade_grade}  AI={futures.ai_score:.0f}  "
                   f"RR={futures.rr:.2f}  MC={futures.mc_profit_prob:.0f}%")
 
-            # Write sheets (unchanged)
+            # Write sheets
             sig_dict = _build_trade_signal_dict(symbol, futures, asset_type)
             log_trade_signals(symbol, [sig_dict], [{"bull":0,"bear":0,"sideway":0}])
             write_all_institutional(
@@ -1056,7 +1057,7 @@ def run_trading_engine() -> None:
                 cross_asset=getattr(futures, 'cross_asset_result', None),
             )
 
-            # ---- Option Chain & Options Analysis (merged into main report) ----
+            # Option Chain & Options Analysis
             print(f"  ⚙️  Option chain...")
             enriched_chain = []
             opts_rec = None
@@ -1096,7 +1097,6 @@ def run_trading_engine() -> None:
                     enriched_chain=enriched_chain,
                 )
                 write_options_analysis(opts_rec)
-                # DO NOT send separate message – will be merged into main report
                 print(f"  📊 Options: {opts_rec.primary.name}  "
                       f"score={opts_rec.primary.score:.0f}  "
                       f"EV={opts_rec.primary.ev:.1f}  "
@@ -1106,7 +1106,7 @@ def run_trading_engine() -> None:
                 logger.error("[%s] Options analysis: %s", symbol, exc)
                 print(f"  ⚠️  Options: {exc}")
 
-            # ---- Crypto extras (unchanged) ----
+            # Crypto extras
             if asset_type == "crypto":
                 try:
                     crypto_msg = _run_crypto_extras(symbol, price)
@@ -1115,20 +1115,18 @@ def run_trading_engine() -> None:
                 except Exception as exc:
                     print(f"  ⚠️  Crypto extras: {exc}")
 
-            # ---- Build unified execution report (futures + options) ----
+            # Unified execution report (futures + options)
             if USE_V3:
                 v3_state = getattr(futures, 'v3_state', None)
-                # Pass opts_rec to the report builder
                 decision_report = report_builder(symbol, price, futures, v3_state, opts_rec)
             else:
                 decision_report = futures.report_text
 
-            # Truncate if needed
             msg = decision_report[:4490] + "\n…" if len(decision_report) > 4500 else decision_report
             send_notification(msg)
             print(f"  📱 Unified execution report → Notification sent")
 
-            # Institutional alert (unchanged)
+            # Institutional alert
             send_institutional_alert(
                 symbol=symbol, price=price, result_v2=futures,
                 liquidity=getattr(futures, 'liquidity_result', None),
@@ -1160,6 +1158,7 @@ if __name__ == "__main__":
     except Exception:
         logger.critical("GLOBAL ERROR:\n%s", traceback.format_exc())
         print(f"GLOBAL ERROR:\n{traceback.format_exc()}")=== ./core/trade_state.py ===
+# core/trade_state.py
 """
 Extended TradeState – Single Source of Truth for V3
 Adds all new fields from phases 1-7.
@@ -1171,24 +1170,24 @@ import numpy as np
 
 @dataclass
 class TradeStateV3:
-    # ----- Phase 1: Walk‑Forward & Adaptive Ensemble -----
-    walk_forward_result: Optional[Dict] = None          # {engine: {sharpe, hit_rate}}
-    ensemble_weights: Optional[Dict[str, float]] = None # dynamic weights
+    # Phase 1: Walk‑Forward & Adaptive Ensemble
+    walk_forward_result: Optional[Dict] = None
+    ensemble_weights: Optional[Dict[str, float]] = None
     signal_records: List[Dict] = field(default_factory=list)
 
-    # ----- Phase 2: Quantile Forecast -----
+    # Phase 2: Quantile Forecast
     quantile_forecast_5d: Optional[Dict] = None
     quantile_forecast_10d: Optional[Dict] = None
     quantile_forecast_20d: Optional[Dict] = None
     forecast_confidence_interval: Optional[tuple] = None
 
-    # ----- Phase 3: Regime‑Switching Monte Carlo -----
-    regime_mc_result: Optional[Dict] = None   # {prob_profit, prob_stop, var_95, cvar_95, regime_weights}
+    # Phase 3: Regime‑Switching Monte Carlo
+    regime_mc_result: Optional[Dict] = None
     dynamic_var: Optional[float] = None
     dynamic_cvar: Optional[float] = None
 
-    # ----- Phase 4: Portfolio Optimizer -----
-    portfolio_allocation: Optional[Dict] = None  # {symbol: weight}
+    # Phase 4: Portfolio Optimizer
+    portfolio_allocation: Optional[Dict] = None
     portfolio_risk_parity_weights: Optional[Dict] = None
     portfolio_min_var_weights: Optional[Dict] = None
     portfolio_max_sharpe_weights: Optional[Dict] = None
@@ -1196,16 +1195,16 @@ class TradeStateV3:
     portfolio_volatility: Optional[float] = None
     portfolio_sharpe: Optional[float] = None
 
-    # ----- Phase 5: Crypto Flow V2 -----
-    crypto_flow_v2: Optional[Dict] = None   # {flow_score, oi_delta, funding_momentum, liquidation_pressure, whale_flow_ratio}
+    # Phase 5: Crypto Flow V2
+    crypto_flow_v2: Optional[Dict] = None
 
-    # ----- Phase 6: Dealer Greeks -----
-    dealer_greeks: Optional[Dict] = None    # {total_gamma, gamma_concentration, pin_risk_strike, dealer_vanna, dealer_charm}
+    # Phase 6: Dealer Greeks
+    dealer_greeks: Optional[Dict] = None
 
-    # ----- Phase 7: Stress Testing -----
-    stress_test_results: Optional[List[Dict]] = None  # list of scenario results
+    # Phase 7: Stress Testing
+    stress_test_results: Optional[List[Dict]] = None
 
-    # ----- Metadata -----
+    # Metadata
     timestamp: datetime = field(default_factory=datetime.now)
     version: str = "3.0"=== ./core/__init__.py ===
 === ./core/futures_orchestrator.py ===
@@ -1798,6 +1797,7 @@ class FuturesOrchestrator_v2:
             btc_beta_spy        = getattr(cross_asset_result,  "btc_beta_to_spy",     1.0),
         )
 === ./core/futures_orchestrator_v3.py ===
+# core/futures_orchestrator_v3.py
 """
 Futures Orchestrator V3 – Extends V2 with all new phases
 """
@@ -1837,7 +1837,7 @@ class FuturesOrchestrator_v3(FuturesOrchestrator_v2):
 
         # Phase 3: Regime-switching MC (if trade is active)
         if self.regime_mc and result_v2.final_decision in ("LONG", "SHORT"):
-            # Get regime probabilities (simplified)
+            # Get regime probabilities (simplified – replace with actual from Markov)
             regime_probs = {"BULL": 0.6, "BEAR": 0.2, "RANGE": 0.2}
             regime_vols = {"BULL": 0.3, "BEAR": 0.5, "RANGE": 0.2}
             mc_result = self.regime_mc.run(
@@ -2700,7 +2700,7 @@ GOOGLE_CREDENTIALS = GOOGLE_CREDENTIALS_PATH   # for compatibility with existing
 TIMEZONE = "Asia/Bangkok"
 
 # ========== V3 Feature Flags ==========
-USE_V3 = os.getenv("USE_V3", "False").lower() == "true"
+USE_V3 = True   # ← switch to True
 
 V3_PHASES = {
     "walk_forward": True,
@@ -16874,9 +16874,9 @@ def build_execution_report_v3(
             lines.append(SEP)
             lines.append(f"STRIKE BANDS ({em.dte}D)")
             lines.append(SEP)
+            lines.append(f"+1.5SD : {_f(em.upper_1_5sd)} {_diff(price, em.upper_1_5sd)}")
             lines.append(f"+1SD   : {_f(em.upper_1sd)} {_diff(price, em.upper_1sd)}")
             lines.append(f"-1SD   : {_f(em.lower_1sd)} {_diff(price, em.lower_1sd)}")
-            lines.append(f"+1.5SD : {_f(em.upper_1_5sd)} {_diff(price, em.upper_1_5sd)}")
             lines.append(f"-1.5SD : {_f(em.lower_1_5sd)} {_diff(price, em.lower_1_5sd)}")
             lines.append("")
 

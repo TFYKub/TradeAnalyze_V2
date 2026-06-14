@@ -45,4 +45,8 @@ pytest>=7.4.0
 pytest-cov>=4.1.0
 
 # ── Logging (unchanged) ───────────────────────────────────────────────────────
+<<<<<<< HEAD
 python-dotenv>=1.0.0
+=======
+python-dotenv>=1.0.0
+>>>>>>> 14de8bd51d6de400d01710975c5477fd8a2370e3
