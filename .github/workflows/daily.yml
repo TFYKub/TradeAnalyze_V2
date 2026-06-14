@@ -15,6 +15,11 @@ jobs:
       SHEET_ID: ${{ secrets.SHEET_ID }}
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+
+
       USE_V3: true                # 👈 Run V3 with all institutional upgrades
       # Optional: override specific phases if needed
       # V3_PHASES_WALK_FORWARD: true
