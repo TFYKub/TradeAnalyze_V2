@@ -33,6 +33,7 @@ from reports.sheet_writer import log_trade_signals
 from reports.sheet_writer_v2 import write_all_institutional
 from utils.symbol_loader import load_symbols_with_type
 from config.thresholds import THRESHOLDS
+from persistence.trade_persistence import get_persistence
 
 from config.config import USE_V3
 
@@ -60,6 +61,23 @@ def _warn_transaction_costs():
     else:
         logger.warning("Transaction costs are DISABLED in config/thresholds.py. "
                        "For realistic backtesting, set MODEL_TRANSACTION_COSTS=True.")
+
+# ---------- Helper: load open positions from database ----------
+def load_open_positions():
+    """Recover open positions from database and notify."""
+    persistence = get_persistence()
+    active = persistence.load_active_trades()
+    if active:
+        logger.info("Recovered %d open positions from database:", len(active))
+        for trade in active:
+            logger.info("  %s %s entry=%.2f size=%.2f%%", trade.symbol, trade.direction,
+                        trade.entry_price, trade.position_size)
+            # Optionally send a recovery alert
+            send_notification(f"[RECOVERY] Open position: {trade.symbol} {trade.direction} "
+                              f"entry={trade.entry_price:.2f} risk={trade.position_size:.1f}%")
+    else:
+        logger.info("No open positions found in database.")
+    return active
 
 # ---------- Helper to build trade signal dict ----------
 def _build_trade_signal_dict(symbol, futures, asset_type):
@@ -112,6 +130,9 @@ def run_trading_engine() -> None:
     # Log transaction cost assumptions (Task 1.6)
     _warn_transaction_costs()
 
+    # Recover open positions (Task 2.4)
+    open_positions = load_open_positions()
+
     validate()
     orchestrator = OrchestratorClass(win_rate=0.52, avg_rr=2.5)
     regime_engine = MarkovRegimeEngine()
@@ -124,12 +145,21 @@ def run_trading_engine() -> None:
 
     print(f"\n🚀 ===== TRADING ENGINE START =====")
     print(f"📊 Symbols: {len(symbol_list)}")
+    if open_positions:
+        print(f"🔄 Recovered {len(open_positions)} open positions from database")
 
     for item in symbol_list:
         symbol = item["symbol"]
         asset_type = item["asset_type"]
         print(f"\n{'━'*44}")
         print(f"📊 {symbol}  ({asset_type})")
+
+        # Skip if symbol already has an open position (prevent duplicate)
+        persistence = get_persistence()
+        if persistence.has_active_trade(symbol):
+            print(f"  ⏸️  Skipping {symbol} – active trade already exists (reconciliation)")
+            logger.info("[%s] Skipped due to existing active trade", symbol)
+            continue
 
         try:
             df = get_market_data(symbol)
@@ -257,7 +287,7 @@ def run_trading_engine() -> None:
 
 if __name__ == "__main__":
     try:
-        # Set timezone to UTC for all datetime operations (Task 0.7)
+        # Set timezone to UTC for all datetime operations
         import os
         os.environ["TZ"] = "UTC"
         time.tzset()
