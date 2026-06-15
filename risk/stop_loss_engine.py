@@ -13,10 +13,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from config.thresholds import THRESHOLDS
+
 logger = logging.getLogger(__name__)
 
 ATR_MULTIPLIER = 1.0
-MIN_RR         = 2.0
+# MIN_RR is now obtained from THRESHOLDS
 
 
 @dataclass(frozen=True)
@@ -80,11 +82,11 @@ def compute_sl_tp(
     rr1  = _rr(tp1)
     rr2  = _rr(tp2)
     best_rr = max(rr1, rr2)
-    valid   = best_rr >= MIN_RR
+    valid   = best_rr >= THRESHOLDS.MIN_RR
 
     reason = (
-        f"RR {best_rr:.1f} ≥ {MIN_RR} ✓" if valid
-        else f"RR {best_rr:.1f} < {MIN_RR} — REJECTED"
+        f"RR {best_rr:.1f} ≥ {THRESHOLDS.MIN_RR} ✓" if valid
+        else f"RR {best_rr:.1f} < {THRESHOLDS.MIN_RR} — REJECTED"
     )
 
     return RiskResult(

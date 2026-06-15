@@ -10,6 +10,7 @@ Inputs:
   entry          : trade entry price
   stop_loss      : stop loss level
   target         : take profit target
+  direction      : "LONG" or "SHORT" – required for correct stop logic
   win_rate       : historical win rate for EV/Kelly weighting
 
 Outputs (MonteCarloResult):
@@ -68,6 +69,7 @@ def run_monte_carlo(
     target:       float,
     horizon:      int   = DEFAULT_HORIZON,
     simulations:  int   = N_SIMULATIONS,
+    direction:    str   = "LONG",      # "LONG" or "SHORT"
 ) -> MonteCarloResult:
     """
     Run GBM Monte Carlo simulation and return risk/probability statistics.
@@ -80,6 +82,7 @@ def run_monte_carlo(
     target       : profit target level
     horizon      : number of trading days to simulate
     simulations  : number of GBM paths
+    direction    : "LONG" or "SHORT" – determines stop and target logic
     """
 
     # ── Calibrate from historical returns ────────────────────────────────────
@@ -106,20 +109,17 @@ def run_monte_carlo(
     final_returns_pct = (final_prices - entry) / entry * 100
 
     # ── Probabilities ─────────────────────────────────────────────────────────
-    prob_profit = float((final_prices > entry).mean() * 100)
-
-    # Stop-loss: did ANY bar during the path touch SL?
-    if stop_loss < entry:  # LONG
+    prob_profit = 0.0
+    if direction.upper() == "LONG":
+        prob_profit = float((final_prices > entry).mean() * 100)
         stop_touched = (price_paths.min(axis=1) <= stop_loss)
-    else:                  # SHORT
-        stop_touched = (price_paths.max(axis=1) >= stop_loss)
-    prob_stop_hit = float(stop_touched.mean() * 100)
-
-    # Target hit: did ANY bar reach target?
-    if target > entry:    # LONG
         target_touched = (price_paths.max(axis=1) >= target)
-    else:                  # SHORT
+    else:  # SHORT
+        prob_profit = float((final_prices < entry).mean() * 100)
+        stop_touched = (price_paths.max(axis=1) >= stop_loss)
         target_touched = (price_paths.min(axis=1) <= target)
+
+    prob_stop_hit = float(stop_touched.mean() * 100)
     prob_target_hit = float(target_touched.mean() * 100)
 
     # ── Expected return + drawdown ────────────────────────────────────────────
@@ -158,9 +158,9 @@ def run_monte_carlo(
     sortino_sim = float(sortino_per_path.mean())
 
     logger.info(
-        "MC[%d paths, %dd]  P(profit)=%.1f%%  P(SL)=%.1f%%  P(TP)=%.1f%%  "
+        "MC[%d paths, %dd, %s]  P(profit)=%.1f%%  P(SL)=%.1f%%  P(TP)=%.1f%%  "
         "E[ret]=%.2f%%  VaR95=%.2f%%",
-        simulations, horizon,
+        simulations, horizon, direction,
         prob_profit, prob_stop_hit, prob_target_hit,
         expected_return, var_95,
     )

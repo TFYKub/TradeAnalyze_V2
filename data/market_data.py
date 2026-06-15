@@ -1,10 +1,10 @@
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import logging
 
 from config.logging_config import logger
 from utils.retry import retry
-
 
 def get_market_data(symbol: str) -> pd.DataFrame:
     """
@@ -12,7 +12,6 @@ def get_market_data(symbol: str) -> pd.DataFrame:
     technical indicators: EMA, RSI-14, ATR-14, historical volatility,
     momentum, drawdown, and composite trend / vol scores.
     """
-
     logger.info(f"Downloading {symbol}")
 
     df: pd.DataFrame = retry(
@@ -38,6 +37,36 @@ def get_market_data(symbol: str) -> pd.DataFrame:
             raise ValueError(f"{symbol}: Missing column '{col}'")
 
     df = df.copy()
+
+    # ------------------------------------------------------------------
+    # DATA VALIDATION – check for zeros, NaNs, outliers
+    # ------------------------------------------------------------------
+    initial_len = len(df)
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        # Zero prices or volume (except volume can be zero for some days)
+        if col != "Volume":
+            zero_mask = df[col] <= 0
+            if zero_mask.any():
+                logger.warning(f"[{symbol}] {col} has {zero_mask.sum()} zero/negative values – dropping those rows")
+                df = df[~zero_mask]
+        # NaNs
+        nan_mask = df[col].isna()
+        if nan_mask.any():
+            logger.warning(f"[{symbol}] {col} has {nan_mask.sum()} NaNs – dropping those rows")
+            df = df[~nan_mask]
+
+    if len(df) == 0:
+        raise ValueError(f"{symbol}: all rows removed by validation")
+
+    # Outlier detection: price change > 50% in a single day (likely data error)
+    pct_change = df["Close"].pct_change().abs()
+    outlier_mask = pct_change > 0.5
+    if outlier_mask.any():
+        logger.warning(f"[{symbol}] {outlier_mask.sum()} rows with >50% daily return – dropping")
+        df = df[~outlier_mask]
+
+    if len(df) < 30:
+        raise ValueError(f"{symbol}: only {len(df)} rows after validation – insufficient")
 
     # ------------------------------------------------------------------
     # RETURNS
@@ -103,6 +132,6 @@ def get_market_data(symbol: str) -> pd.DataFrame:
     # ------------------------------------------------------------------
     df["VolScore"] = df["ATR14"] / df["Close"]
 
-    logger.info(f"{symbol}: {len(df)} rows loaded")
+    logger.info(f"{symbol}: {len(df)} rows loaded (initial {initial_len})")
 
     return df

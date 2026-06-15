@@ -12,7 +12,7 @@ AI Trade Scoring Engine
 Formula:
   FINAL = (Regime*0.30) + (Structure*0.25) + (Trend*0.20) + (Momentum*0.15) + (RR*0.10)
 
-Trade allowed only if FINAL_AI_SCORE >= 70
+Trade allowed only if FINAL_AI_SCORE >= MIN_AI_SCORE
 """
 
 from __future__ import annotations
@@ -20,9 +20,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from config.thresholds import THRESHOLDS
+
 logger = logging.getLogger(__name__)
 
-MIN_AI_SCORE = 70.0   # threshold to allow trade
+# MIN_AI_SCORE is now obtained from THRESHOLDS
 
 
 @dataclass(frozen=True)
@@ -181,7 +183,8 @@ def compute_ai_score(
     )
     final = round(final, 1)
 
-    trade_allowed = final >= MIN_AI_SCORE and direction != "WAIT"
+    min_ai = THRESHOLDS.MIN_AI_SCORE
+    trade_allowed = final >= min_ai and direction != "WAIT"
 
     breakdown = {
         "regime_score":    rs,
@@ -193,9 +196,9 @@ def compute_ai_score(
     }
 
     reason = (
-        f"AI Score {final:.0f} ≥ {MIN_AI_SCORE} → TRADE ALLOWED"
+        f"AI Score {final:.0f} ≥ {min_ai} → TRADE ALLOWED"
         if trade_allowed
-        else f"AI Score {final:.0f} < {MIN_AI_SCORE} → NO TRADE"
+        else f"AI Score {final:.0f} < {min_ai} → NO TRADE"
     )
 
     return AIScoreResult(

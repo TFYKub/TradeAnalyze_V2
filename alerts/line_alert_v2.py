@@ -8,6 +8,7 @@ Extends the original send_line_message() with:
   • Global lock to serialise requests
   • Detailed header logging for error diagnosis
   • Monthly quota detection and permanent disable
+  • **NEW**: Splits long messages by lines into multiple messages (each ≤ 4500 chars)
 All formatting functions are unchanged from the original V2.
 """
 from __future__ import annotations
@@ -94,6 +95,29 @@ def _log_response_headers(resp: requests.Response) -> None:
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("[line_v2] Full response headers: %s", dict(resp.headers))
 
+def _split_message_by_lines(msg: str, limit: int) -> list[str]:
+    """Split a message into chunks at newlines, each chunk <= limit characters."""
+    lines = msg.splitlines()
+    chunks = []
+    current = []
+    current_len = 0
+
+    for line in lines:
+        line_len = len(line) + 1  # +1 for newline (except last line)
+        if current_len + line_len <= limit:
+            current.append(line)
+            current_len += line_len
+        else:
+            # Flush current chunk
+            if current:
+                chunks.append("\n".join(current))
+            # Start new chunk
+            current = [line]
+            current_len = line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
 def send_line_message(msg: str) -> bool:
     """Broadcast a text message via LINE Messaging API with rate limiting and smart retries."""
     global LINE_DISABLED
@@ -105,78 +129,88 @@ def send_line_message(msg: str) -> bool:
         logger.warning("LINE_TOKEN not set — skipping LINE notification")
         return False
 
-    with _send_lock:
-        # Wait for a token
-        while not _consume_token():
-            time.sleep(0.1)
+    # Split long message into chunks
+    chunks = _split_message_by_lines(msg, LINE_CHAR_LIMIT)
+    overall_success = True
 
-        headers = {
-            "Authorization": f"Bearer {LINE_TOKEN}",
-            "Content-Type": "application/json",
-        }
-        payload = {"messages": [{"type": "text", "text": msg[:LINE_CHAR_LIMIT]}]}
+    for i, chunk in enumerate(chunks):
+        logger.debug("[line_v2] Sending chunk %d/%d (%d chars)", i+1, len(chunks), len(chunk))
+        with _send_lock:
+            while not _consume_token():
+                time.sleep(0.1)
 
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                resp = requests.post(_LINE_BROADCAST_URL, headers=headers, json=payload, timeout=30)
+            headers = {
+                "Authorization": f"Bearer {LINE_TOKEN}",
+                "Content-Type": "application/json",
+            }
+            payload = {"messages": [{"type": "text", "text": chunk}]}
 
-                if resp.status_code == 200:
-                    logger.info("[line_v2] message sent (%d chars)", len(msg))
-                    return True
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    resp = requests.post(_LINE_BROADCAST_URL, headers=headers, json=payload, timeout=30)
 
-                if resp.status_code == 429:
+                    if resp.status_code == 200:
+                        logger.info("[line_v2] chunk %d/%d sent", i+1, len(chunks))
+                        break
+
+                    if resp.status_code == 429:
+                        _log_response_headers(resp)
+                        error_str = ""
+                        try:
+                            error_body = resp.json()
+                            error_str = json.dumps(error_body).lower()
+                            logger.warning("[line_v2] 429 error body: %s", error_str[:200])
+                        except:
+                            error_str = resp.text.lower()
+                            logger.warning("[line_v2] 429 error body (text): %s", resp.text[:200])
+
+                        # Monthly quota detection
+                        if "monthly" in error_str and "limit" in error_str:
+                            logger.warning("[LINE] Monthly quota exceeded – disabling LINE for this runtime")
+                            LINE_DISABLED = True
+                            import config.config as cfg
+                            cfg.LINE_DISABLED = True
+                            return False
+
+                        retry_after = resp.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                wait = int(retry_after)
+                            except ValueError:
+                                wait = min(60, 2 ** attempt)
+                        else:
+                            wait = min(60, 2 ** attempt)
+                        wait += random.uniform(0, 3)
+                        logger.warning("[line_v2] 429 Too Many Requests (attempt %d/%d), waiting %.1fs", attempt, MAX_RETRIES, wait)
+                        time.sleep(wait)
+                        continue
+
+                    # Other errors
                     _log_response_headers(resp)
-                    error_str = ""
                     try:
                         error_body = resp.json()
-                        error_str = json.dumps(error_body).lower()
-                        logger.warning("[line_v2] 429 error body: %s", error_str[:200])
+                        logger.error("[line_v2] HTTP %d error body: %s", resp.status_code, json.dumps(error_body)[:200])
                     except:
-                        error_str = resp.text.lower()
-                        logger.warning("[line_v2] 429 error body (text): %s", resp.text[:200])
+                        logger.error("[line_v2] HTTP %d error body (text): %s", resp.status_code, resp.text[:200])
+                    overall_success = False
+                    break
 
-                    # Monthly quota detection
-                    if "monthly" in error_str and "limit" in error_str:
-                        logger.warning("[LINE] Monthly quota exceeded – disabling LINE for this runtime")
-                        LINE_DISABLED = True
-                        import config.config as cfg
-                        cfg.LINE_DISABLED = True
-                        return False
-
-                    retry_after = resp.headers.get("Retry-After")
-                    if retry_after:
-                        try:
-                            wait = int(retry_after)
-                        except ValueError:
-                            wait = min(60, 2 ** attempt)
-                    else:
-                        wait = min(60, 2 ** attempt)
-                    wait += random.uniform(0, 3)
-                    logger.warning("[line_v2] 429 Too Many Requests (attempt %d/%d), waiting %.1fs", attempt, MAX_RETRIES, wait)
-                    time.sleep(wait)
+                except requests.Timeout:
+                    logger.error("[line_v2] Request timeout (attempt %d/%d)", attempt, MAX_RETRIES)
+                    if attempt == MAX_RETRIES:
+                        overall_success = False
+                        break
+                    time.sleep(min(60, 2 ** attempt))
                     continue
+                except Exception as exc:
+                    logger.error("[line_v2] send failed: %s", exc)
+                    overall_success = False
+                    break
+            else:
+                logger.error("[line_v2] send failed after %d retries", MAX_RETRIES)
+                overall_success = False
 
-                # Other errors
-                _log_response_headers(resp)
-                try:
-                    error_body = resp.json()
-                    logger.error("[line_v2] HTTP %d error body: %s", resp.status_code, json.dumps(error_body)[:200])
-                except:
-                    logger.error("[line_v2] HTTP %d error body (text): %s", resp.status_code, resp.text[:200])
-                return False
-
-            except requests.Timeout:
-                logger.error("[line_v2] Request timeout (attempt %d/%d)", attempt, MAX_RETRIES)
-                if attempt == MAX_RETRIES:
-                    return False
-                time.sleep(min(60, 2 ** attempt))
-                continue
-            except Exception as exc:
-                logger.error("[line_v2] send failed: %s", exc)
-                return False
-
-        logger.error("[line_v2] send failed after %d retries", MAX_RETRIES)
-        return False
+    return overall_success
 
 # ----------------------------------------------------------------------
 # Emoji maps and block formatters (unchanged from original V2)
@@ -378,8 +412,7 @@ def format_institutional_alert(
         _fmt_footer(result_v2),
     ]
     msg = "".join(blocks)
-    if len(msg) > LINE_CHAR_LIMIT:
-        msg = msg[:LINE_CHAR_LIMIT - 20] + "\n...[truncated]"
+    # No truncation here – will be split later in send_line_message
     return msg
 
 def _should_alert(result_v2, conviction=None, min_conviction: float = 50.0) -> bool:
