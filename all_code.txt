@@ -927,21 +927,17 @@ def compute_risk_budget(
         active_positions     = len(positions),
     )
 === ./main.py ===
-# main.py – full file (as in your codebase, verified)
-"""
-TradeAnalyze — Main Entry Point  (v2 — full institutional)
-=============================================================
-Uses FuturesOrchestrator_v2/v3 exclusively.
-All LINE messages go through line_alert_v2 (which exports send_line_message).
-"""
+# main.py – full file with parallel processing and batch flush
 import time
 import traceback
 import warnings
 from datetime import datetime, timezone
+import concurrent.futures
 
 warnings.filterwarnings("ignore")
 
 from config.config_validator import validate
+from config.config import USE_V3, USE_PARALLEL, MAX_WORKERS
 from config.logging_config import logger
 from alerts.line_alert_v2 import send_institutional_alert
 from alerts.notification_manager import send_notification
@@ -963,8 +959,7 @@ from reports.sheet_writer_v2 import write_all_institutional
 from utils.symbol_loader import load_symbols_with_type
 from config.thresholds import THRESHOLDS
 from persistence.trade_persistence import get_persistence
-
-from config.config import USE_V3
+from utils.batch_writer import get_batch_writer
 
 if USE_V3:
     from core.futures_orchestrator_v3 import FuturesOrchestrator_v3
@@ -978,9 +973,8 @@ else:
 
 MIN_CONVICTION_ALERT = 60.0
 
-# ---------- Helper: warn about zero transaction costs ----------
+
 def _warn_transaction_costs():
-    """Log a warning if transaction costs are not being modelled."""
     if THRESHOLDS.MODEL_TRANSACTION_COSTS:
         logger.info(
             "Transaction cost model ENABLED: stocks %.3f%% (round-trip), crypto %.3f%%",
@@ -991,9 +985,8 @@ def _warn_transaction_costs():
         logger.warning("Transaction costs are DISABLED in config/thresholds.py. "
                        "For realistic backtesting, set MODEL_TRANSACTION_COSTS=True.")
 
-# ---------- Helper: load open positions from database ----------
+
 def load_open_positions():
-    """Recover open positions from database and notify."""
     persistence = get_persistence()
     active = persistence.load_active_trades()
     if active:
@@ -1001,14 +994,13 @@ def load_open_positions():
         for trade in active:
             logger.info("  %s %s entry=%.2f size=%.2f%%", trade.symbol, trade.direction,
                         trade.entry_price, trade.position_size)
-            # Optionally send a recovery alert
             send_notification(f"[RECOVERY] Open position: {trade.symbol} {trade.direction} "
                               f"entry={trade.entry_price:.2f} risk={trade.position_size:.1f}%")
     else:
         logger.info("No open positions found in database.")
     return active
 
-# ---------- Helper to build trade signal dict ----------
+
 def _build_trade_signal_dict(symbol, futures, asset_type):
     return {
         "symbol": symbol, "regime": futures.regime, "price": futures.price,
@@ -1026,7 +1018,7 @@ def _build_trade_signal_dict(symbol, futures, asset_type):
         "avg_gamma": None, "fast_decay_pct": None, "asset_type": asset_type,
     }
 
-# ---------- Crypto extras ----------
+
 def _run_crypto_extras(symbol: str, price: float) -> str:
     lines = ["", "━"*28, "🔐 CRYPTO INSTITUTIONAL DATA", "━"*28]
     try:
@@ -1054,18 +1046,141 @@ def _run_crypto_extras(symbol: str, price: float) -> str:
 
     return "\n".join(lines)
 
-# ---------- Main trading engine ----------
+
+def _process_symbol(item):
+    """Process a single symbol – extracted from original loop."""
+    symbol = item["symbol"]
+    asset_type = item["asset_type"]
+    print(f"\n{'━'*44}")
+    print(f"📊 {symbol}  ({asset_type})")
+
+    persistence = get_persistence()
+    if persistence.has_active_trade(symbol):
+        print(f"  ⏸️  Skipping {symbol} – active trade already exists (reconciliation)")
+        logger.info("[%s] Skipped due to existing active trade", symbol)
+        return
+
+    try:
+        df = get_market_data(symbol)
+        if df is None or df.empty:
+            print(f"  ❌ No market data")
+            return
+
+        price = float(df["Close"].iloc[-1])
+        print(f"  ⚙️  Futures analysis...")
+        orchestrator = OrchestratorClass(win_rate=0.52, avg_rr=2.5)
+        futures = orchestrator.run(symbol, df)
+
+        dec_e = {"LONG":"🟢","SHORT":"🔴","NO_TRADE":"⏸️"}.get(futures.final_decision,"❓")
+        print(f"  {dec_e} {futures.final_decision}  "
+              f"Regime={futures.regime}({futures.regime_conf:.0f}%)  "
+              f"Grade={futures.trade_grade}  AI={futures.ai_score:.0f}  "
+              f"RR={futures.rr:.2f}  MC={futures.mc_profit_prob:.0f}%")
+
+        sig_dict = _build_trade_signal_dict(symbol, futures, asset_type)
+        log_trade_signals(symbol, [sig_dict], [{"bull":0,"bear":0,"sideway":0}])
+        write_all_institutional(
+            symbol=symbol, price=price, result_v2=futures,
+            liquidity=getattr(futures, 'liquidity_result', None),
+            flow=getattr(futures, 'flow_result', None),
+            breadth=getattr(futures, 'breadth_result', None),
+            persistence=getattr(futures, 'persistence_result', None),
+            forecast=getattr(futures, 'forecast_result', None),
+            conviction=getattr(futures, 'conviction_result', None),
+            cross_asset=getattr(futures, 'cross_asset_result', None),
+        )
+
+        print(f"  ⚙️  Option chain...")
+        enriched_chain = []
+        opts_rec = None
+        try:
+            raw_chain = fetch_option_chain(symbol, price, asset_type=asset_type)
+            enriched_chain = enrich_with_greeks(raw_chain, spot=price)
+            if enriched_chain:
+                clear_symbol_rows(symbol)
+                n = write_option_chain(symbol, enriched_chain)
+                print(f"  📋 Option_Chain: {n} rows ✅")
+                df_ind = compute_ema(compute_rsi(compute_atr(df.copy())))
+                chain_iv = next((float(r["iv"]) for r in enriched_chain
+                                 if r.get("option_type") == "call" and r.get("iv", 0) > 0), None)
+                iv_rank_result = compute_iv_rank(df_ind, current_iv=chain_iv)
+                iv_surface = compute_vol_surface(enriched_chain)
+                print(f"  📐 IV Rank={iv_rank_result.iv_rank:.0f}  {iv_rank_result.signal}  "
+                      f"Skew={iv_surface.skew_signal}")
+            else:
+                print(f"  ⚠️  Option chain: no data")
+        except Exception as exc:
+            logger.warning("[%s] Option chain: %s", symbol, exc)
+            print(f"  ⚠️  Option chain: {exc}")
+
+        print(f"  ⚙️  Options analysis...")
+        try:
+            regime_engine = MarkovRegimeEngine()
+            df_ind = compute_ema(compute_rsi(compute_atr(df.copy())))
+            try:
+                reg_result = regime_engine.detect(df_ind)
+                regime_probs = reg_result.regime_probs_all
+            except Exception:
+                regime_probs = {futures.regime: 0.65}
+
+            opts_rec = run_options_analysis(
+                symbol=symbol, price=price, df=df_ind,
+                regime=futures.regime, regime_conf=futures.regime_conf,
+                regime_probs=regime_probs, ai_score=futures.ai_score,
+                enriched_chain=enriched_chain,
+            )
+            write_options_analysis(opts_rec)
+            print(f"  📊 Options: {opts_rec.primary.name}  "
+                  f"score={opts_rec.primary.score:.0f}  "
+                  f"EV={opts_rec.primary.ev:.1f}  "
+                  f"POP={opts_rec.primary.pop:.0f}%  "
+                  f"{'✅' if opts_rec.trade_approved else '⏸️'}")
+        except Exception as exc:
+            logger.error("[%s] Options analysis: %s", symbol, exc)
+            print(f"  ⚠️  Options: {exc}")
+
+        if asset_type == "crypto":
+            try:
+                crypto_msg = _run_crypto_extras(symbol, price)
+                send_notification(crypto_msg)
+                print(f"  🔐 Crypto data sent")
+            except Exception as exc:
+                print(f"  ⚠️  Crypto extras: {exc}")
+
+        if USE_V3:
+            v3_state = getattr(futures, 'v3_state', None)
+            decision_report = report_builder(symbol, price, futures, v3_state, opts_rec)
+        else:
+            decision_report = futures.report_text
+
+        msg = decision_report[:4490] + "\n…" if len(decision_report) > 4500 else decision_report
+        send_notification(msg)
+        print(f"  📱 Unified execution report → Notification sent")
+
+        send_institutional_alert(
+            symbol=symbol, price=price, result_v2=futures,
+            liquidity=getattr(futures, 'liquidity_result', None),
+            flow=getattr(futures, 'flow_result', None),
+            breadth=getattr(futures, 'breadth_result', None),
+            persistence=getattr(futures, 'persistence_result', None),
+            forecast=getattr(futures, 'forecast_result', None),
+            conviction=getattr(futures, 'conviction_result', None),
+            cross_asset=getattr(futures, 'cross_asset_result', None),
+            min_conviction=MIN_CONVICTION_ALERT,
+        )
+
+        print(f"  ⏱  {futures.runtime:.1f}s")
+        time.sleep(1.5)
+
+    except Exception:
+        logger.error("[%s] UNHANDLED:\n%s", symbol, traceback.format_exc())
+        print(f"  ❌ ERROR:\n{traceback.format_exc()}")
+
+
 def run_trading_engine() -> None:
-    # Log transaction cost assumptions (Task 1.6)
     _warn_transaction_costs()
-
-    # Recover open positions (Task 2.4)
-    open_positions = load_open_positions()
-
+    load_open_positions()
     validate()
-    orchestrator = OrchestratorClass(win_rate=0.52, avg_rr=2.5)
-    regime_engine = MarkovRegimeEngine()
-    success = fail = 0
 
     symbol_list = load_symbols_with_type("LINE")
     if not symbol_list:
@@ -1074,149 +1189,29 @@ def run_trading_engine() -> None:
 
     print(f"\n🚀 ===== TRADING ENGINE START =====")
     print(f"📊 Symbols: {len(symbol_list)}")
-    if open_positions:
-        print(f"🔄 Recovered {len(open_positions)} open positions from database")
 
-    for item in symbol_list:
-        symbol = item["symbol"]
-        asset_type = item["asset_type"]
-        print(f"\n{'━'*44}")
-        print(f"📊 {symbol}  ({asset_type})")
-
-        # Skip if symbol already has an open position (prevent duplicate)
-        persistence = get_persistence()
-        if persistence.has_active_trade(symbol):
-            print(f"  ⏸️  Skipping {symbol} – active trade already exists (reconciliation)")
-            logger.info("[%s] Skipped due to existing active trade", symbol)
-            continue
-
-        try:
-            df = get_market_data(symbol)
-            if df is None or df.empty:
-                print(f"  ❌ No market data"); fail += 1; continue
-
-            price = float(df["Close"].iloc[-1])
-            print(f"  ⚙️  Futures analysis...")
-            futures = orchestrator.run(symbol, df)
-
-            dec_e = {"LONG":"🟢","SHORT":"🔴","NO_TRADE":"⏸️"}.get(futures.final_decision,"❓")
-            print(f"  {dec_e} {futures.final_decision}  "
-                  f"Regime={futures.regime}({futures.regime_conf:.0f}%)  "
-                  f"Grade={futures.trade_grade}  AI={futures.ai_score:.0f}  "
-                  f"RR={futures.rr:.2f}  MC={futures.mc_profit_prob:.0f}%")
-
-            # Write sheets
-            sig_dict = _build_trade_signal_dict(symbol, futures, asset_type)
-            log_trade_signals(symbol, [sig_dict], [{"bull":0,"bear":0,"sideway":0}])
-            write_all_institutional(
-                symbol=symbol, price=price, result_v2=futures,
-                liquidity=getattr(futures, 'liquidity_result', None),
-                flow=getattr(futures, 'flow_result', None),
-                breadth=getattr(futures, 'breadth_result', None),
-                persistence=getattr(futures, 'persistence_result', None),
-                forecast=getattr(futures, 'forecast_result', None),
-                conviction=getattr(futures, 'conviction_result', None),
-                cross_asset=getattr(futures, 'cross_asset_result', None),
-            )
-
-            # Option Chain & Options Analysis
-            print(f"  ⚙️  Option chain...")
-            enriched_chain = []
-            opts_rec = None
-            try:
-                raw_chain = fetch_option_chain(symbol, price, asset_type=asset_type)
-                enriched_chain = enrich_with_greeks(raw_chain, spot=price)
-                if enriched_chain:
-                    clear_symbol_rows(symbol)
-                    n = write_option_chain(symbol, enriched_chain)
-                    print(f"  📋 Option_Chain: {n} rows ✅")
-                    df_ind = compute_ema(compute_rsi(compute_atr(df.copy())))
-                    chain_iv = next((float(r["iv"]) for r in enriched_chain
-                                     if r.get("option_type") == "call" and r.get("iv", 0) > 0), None)
-                    iv_rank_result = compute_iv_rank(df_ind, current_iv=chain_iv)
-                    iv_surface = compute_vol_surface(enriched_chain)
-                    print(f"  📐 IV Rank={iv_rank_result.iv_rank:.0f}  {iv_rank_result.signal}  "
-                          f"Skew={iv_surface.skew_signal}")
-                else:
-                    print(f"  ⚠️  Option chain: no data")
-            except Exception as exc:
-                logger.warning("[%s] Option chain: %s", symbol, exc)
-                print(f"  ⚠️  Option chain: {exc}")
-
-            print(f"  ⚙️  Options analysis...")
-            try:
-                df_ind = compute_ema(compute_rsi(compute_atr(df.copy())))
+    if USE_PARALLEL:
+        print(f"⚡ Using parallel mode with {MAX_WORKERS} workers")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [executor.submit(_process_symbol, item) for item in symbol_list]
+            for future in concurrent.futures.as_completed(futures):
                 try:
-                    reg_result = regime_engine.detect(df_ind)
-                    regime_probs = reg_result.regime_probs_all
-                except Exception:
-                    regime_probs = {futures.regime: 0.65}
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Parallel task failed: {e}")
+    else:
+        print("⏺ Using sequential mode")
+        for item in symbol_list:
+            _process_symbol(item)
 
-                opts_rec = run_options_analysis(
-                    symbol=symbol, price=price, df=df_ind,
-                    regime=futures.regime, regime_conf=futures.regime_conf,
-                    regime_probs=regime_probs, ai_score=futures.ai_score,
-                    enriched_chain=enriched_chain,
-                )
-                write_options_analysis(opts_rec)
-                print(f"  📊 Options: {opts_rec.primary.name}  "
-                      f"score={opts_rec.primary.score:.0f}  "
-                      f"EV={opts_rec.primary.ev:.1f}  "
-                      f"POP={opts_rec.primary.pop:.0f}%  "
-                      f"{'✅' if opts_rec.trade_approved else '⏸️'}")
-            except Exception as exc:
-                logger.error("[%s] Options analysis: %s", symbol, exc)
-                print(f"  ⚠️  Options: {exc}")
+    # Flush all batched Google Sheets writes
+    get_batch_writer().flush()
+    print("\n✅ All data flushed to Google Sheets.")
+    logger.info("Engine done — all writes flushed.")
 
-            # Crypto extras
-            if asset_type == "crypto":
-                try:
-                    crypto_msg = _run_crypto_extras(symbol, price)
-                    send_notification(crypto_msg)
-                    print(f"  🔐 Crypto data sent")
-                except Exception as exc:
-                    print(f"  ⚠️  Crypto extras: {exc}")
-
-            # Unified execution report (futures + options)
-            if USE_V3:
-                v3_state = getattr(futures, 'v3_state', None)
-                decision_report = report_builder(symbol, price, futures, v3_state, opts_rec)
-            else:
-                decision_report = futures.report_text
-
-            msg = decision_report[:4490] + "\n…" if len(decision_report) > 4500 else decision_report
-            send_notification(msg)
-            print(f"  📱 Unified execution report → Notification sent")
-
-            # Institutional alert
-            send_institutional_alert(
-                symbol=symbol, price=price, result_v2=futures,
-                liquidity=getattr(futures, 'liquidity_result', None),
-                flow=getattr(futures, 'flow_result', None),
-                breadth=getattr(futures, 'breadth_result', None),
-                persistence=getattr(futures, 'persistence_result', None),
-                forecast=getattr(futures, 'forecast_result', None),
-                conviction=getattr(futures, 'conviction_result', None),
-                cross_asset=getattr(futures, 'cross_asset_result', None),
-                min_conviction=MIN_CONVICTION_ALERT,
-            )
-
-            success += 1
-            print(f"  ⏱  {futures.runtime:.1f}s")
-            time.sleep(1.5)
-
-        except Exception:
-            fail += 1
-            logger.error("[%s] UNHANDLED:\n%s", symbol, traceback.format_exc())
-            print(f"  ❌ ERROR:\n{traceback.format_exc()}")
-
-    print(f"\n{'━'*44}")
-    print(f"🏁 DONE  ✅ {success}  ❌ {fail}")
-    logger.info("Engine done — success=%d fail=%d", success, fail)
 
 if __name__ == "__main__":
     try:
-        # Set timezone to UTC for all datetime operations
         import os
         os.environ["TZ"] = "UTC"
         time.tzset()
@@ -1225,22 +1220,14 @@ if __name__ == "__main__":
         logger.critical("GLOBAL ERROR:\n%s", traceback.format_exc())
         print(f"GLOBAL ERROR:\n{traceback.format_exc()}")=== ./persistence/trade_persistence.py ===
 """
-Trade Persistence Layer – SQLite for Stateful Bot
-===================================================
-Provides crash recovery and position reconciliation.
-
-Schemas:
-  active_trades    – open positions with full state
-  trade_history    – closed trades for P&L tracking
-  engine_signals   – every signal for walk‑forward analysis
-
-All operations are idempotent and thread‑safe.
+Trade Persistence Layer – SQLite with thread‑local connections.
 """
 from __future__ import annotations
 
 import sqlite3
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, List
@@ -1251,26 +1238,23 @@ logger = logging.getLogger(__name__)
 DB_PATH = "trade_analyze.db"
 
 
-# ---------- Dataclasses for persistence ----------
 @dataclass
 class ActiveTrade:
-    """Open trade as stored in database."""
     symbol: str
-    direction: str          # LONG / SHORT
+    direction: str
     entry_price: float
     stop_loss: float
     tp1: float
     tp2: float
-    position_size: float    # in % of capital
-    entry_time: str         # ISO format
-    entry_snapshot: str     # JSON of key state (regime, confidence, etc.)
-    trade_id: str           # unique (symbol + entry_time)
+    position_size: float
+    entry_time: str
+    entry_snapshot: str
+    trade_id: str
     last_updated: str
 
 
 @dataclass
 class ClosedTrade:
-    """Completed trade for P&L tracking."""
     symbol: str
     direction: str
     entry_price: float
@@ -1281,28 +1265,24 @@ class ClosedTrade:
     entry_snapshot: str
 
 
-# ---------- Persistence Manager ----------
 class TradePersistence:
-    """Singleton managing all trade persistence operations."""
-
+    """Singleton with thread‑local SQLite connections."""
     _instance = None
+    _lock = threading.Lock()
+    _thread_local = threading.local()
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._init_db()
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._init_db()
         return cls._instance
 
     def _init_db(self):
-        """Create tables if they don't exist."""
-        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self._create_tables()
-
-    def _create_tables(self):
-        cursor = self.conn.cursor()
-
-        # Active trades
+        """Create tables if they don't exist (main thread only)."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS active_trades (
                 trade_id TEXT PRIMARY KEY,
@@ -1320,7 +1300,6 @@ class TradePersistence:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_active_symbol ON active_trades(symbol)")
 
-        # Trade history
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS trade_history (
                 trade_id TEXT PRIMARY KEY,
@@ -1336,7 +1315,6 @@ class TradePersistence:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_symbol ON trade_history(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_time ON trade_history(exit_time)")
 
-        # Engine signals (for walk‑forward)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS engine_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1351,23 +1329,28 @@ class TradePersistence:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_engine ON engine_signals(engine, timestamp)")
 
-        self.conn.commit()
+        conn.commit()
+
+    def _get_conn(self):
+        if not hasattr(self._thread_local, "conn"):
+            self._thread_local.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            self._thread_local.conn.row_factory = sqlite3.Row
+        return self._thread_local.conn
 
     @contextmanager
     def _cursor(self):
-        cursor = self.conn.cursor()
+        conn = self._get_conn()
+        cursor = conn.cursor()
         try:
             yield cursor
-            self.conn.commit()
+            conn.commit()
         except Exception:
-            self.conn.rollback()
+            conn.rollback()
             raise
         finally:
             cursor.close()
 
-    # ----- Active Trades -----
     def save_active_trade(self, trade: ActiveTrade) -> None:
-        """Insert or replace an active trade."""
         with self._cursor() as cur:
             cur.execute("""
                 INSERT OR REPLACE INTO active_trades
@@ -1382,13 +1365,11 @@ class TradePersistence:
         logger.info("[persistence] Saved active trade %s", trade.trade_id)
 
     def delete_active_trade(self, trade_id: str) -> None:
-        """Remove a trade from active_trades (when closed)."""
         with self._cursor() as cur:
             cur.execute("DELETE FROM active_trades WHERE trade_id = ?", (trade_id,))
         logger.info("[persistence] Deleted active trade %s", trade_id)
 
     def load_active_trades(self) -> List[ActiveTrade]:
-        """Return all active trades as ActiveTrade objects."""
         with self._cursor() as cur:
             cur.execute("SELECT * FROM active_trades")
             rows = cur.fetchall()
@@ -1410,14 +1391,11 @@ class TradePersistence:
         return trades
 
     def has_active_trade(self, symbol: str) -> bool:
-        """Check if there is already an open trade for a symbol (reconciliation)."""
         with self._cursor() as cur:
             cur.execute("SELECT 1 FROM active_trades WHERE symbol = ? LIMIT 1", (symbol,))
             return cur.fetchone() is not None
 
-    # ----- Trade History -----
     def save_closed_trade(self, closed: ClosedTrade) -> None:
-        """Insert a closed trade into history."""
         with self._cursor() as cur:
             cur.execute("""
                 INSERT OR REPLACE INTO trade_history
@@ -1431,7 +1409,6 @@ class TradePersistence:
         logger.info("[persistence] Saved closed trade %s pnl=%.2f%%", closed.trade_id, closed.pnl_pct)
 
     def load_recent_history(self, limit: int = 100) -> List[ClosedTrade]:
-        """Return most recent closed trades."""
         with self._cursor() as cur:
             cur.execute("SELECT * FROM trade_history ORDER BY exit_time DESC LIMIT ?", (limit,))
             rows = cur.fetchall()
@@ -1444,7 +1421,6 @@ class TradePersistence:
             ) for r in rows
         ]
 
-    # ----- Engine Signals -----
     def insert_signal(self, timestamp: str, symbol: str, engine: str,
                       predicted_direction: str, confidence: float) -> None:
         with self._cursor() as cur:
@@ -1464,19 +1440,19 @@ class TradePersistence:
                 WHERE timestamp = ? AND symbol = ? AND engine = ?
             """, (actual_return, actual_dir, timestamp, symbol, engine))
 
-    # ----- Utility -----
     def clear_all_active_trades(self) -> None:
-        """Force clear (used for testing or emergency reset)."""
         with self._cursor() as cur:
             cur.execute("DELETE FROM active_trades")
         logger.warning("[persistence] Cleared all active trades")
 
     def close(self):
-        self.conn.close()
+        if hasattr(self._thread_local, "conn"):
+            self._thread_local.conn.close()
+            del self._thread_local.conn
 
 
-# Singleton instance
 _persistence = None
+
 
 def get_persistence() -> TradePersistence:
     global _persistence
@@ -3079,7 +3055,6 @@ if not SHEET_ID:
 if not GOOGLE_CREDENTIALS_RAW:
     raise EnvironmentError("Missing GOOGLE_CREDENTIALS in environment variables")
 
-# If GOOGLE_CREDENTIALS_RAW is a JSON string (starts with '{'), write to temp file.
 if GOOGLE_CREDENTIALS_RAW.strip().startswith('{'):
     tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
     tmp.write(GOOGLE_CREDENTIALS_RAW)
@@ -3088,12 +3063,12 @@ if GOOGLE_CREDENTIALS_RAW.strip().startswith('{'):
 else:
     GOOGLE_CREDENTIALS_PATH = GOOGLE_CREDENTIALS_RAW
 
-GOOGLE_CREDENTIALS = GOOGLE_CREDENTIALS_PATH   # for compatibility with existing code
+GOOGLE_CREDENTIALS = GOOGLE_CREDENTIALS_PATH
 
 TIMEZONE = "Asia/Bangkok"
 
 # ========== V3 Feature Flags ==========
-USE_V3 = True   # ← switch to True
+USE_V3 = True
 
 V3_PHASES = {
     "walk_forward": True,
@@ -3105,17 +3080,17 @@ V3_PHASES = {
     "stress_testing": True,
 }
 
+# ========== Performance & Scaling Flags ==========
+USE_PARALLEL = True          # enable parallel symbol processing (ThreadPool)
+MAX_WORKERS = 4              # number of concurrent workers
+
 # ========== Notification Configuration ==========
 LINE_TOKEN = os.getenv("LINE_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Runtime flag set when LINE monthly quota exceeded
 LINE_DISABLED = False
 
-# ========== Startup Validation ==========
-# This runs when config.py is imported (after logging is not yet configured,
-# so we use print statements for clarity).
 print("\n[CONFIG] Notification channel status:")
 if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
     print("  ✅ Telegram enabled")
@@ -3126,7 +3101,7 @@ if LINE_TOKEN:
     print("  ✅ LINE enabled")
 else:
     print("  ⚠️ LINE disabled (missing LINE_TOKEN)")
-print("")   # blank line for readability=== ./config/config_validator.py ===
+print("")=== ./config/config_validator.py ===
 import os
 
 
@@ -12091,101 +12066,89 @@ def compute_market_breadth() -> MarketBreadthResult:
     )
 === ./engines/volume_profile.py ===
 """
-Volume Profile Engine  (Phase 6)
-==================================
-Calculates: POC | HVN | LVN | Value Area High | Value Area Low
-
-Algorithm: TPO (Time-Price-Opportunity) histogram
-  1. Bin price range into N buckets
-  2. Sum volume in each bucket
-  3. POC = bucket with max volume
-  4. Value Area = 70% of total volume around POC
-  5. HVN = buckets with > 1.5× average volume
-  6. LVN = buckets with < 0.5× average volume
+Volume Profile Engine – Vectorised with numpy.histogram
 """
 from __future__ import annotations
 import logging
 from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
-N_BINS    = 50      # price buckets
-VA_TARGET = 0.70    # 70% of volume = Value Area
+N_BINS    = 50
+VA_TARGET = 0.70
 
-
-@dataclass(frozen=True)
-class VolumeLevelResult:
-    price:         float
-    volume:        float
-    volume_pct:    float    # % of total volume at this level
-    label:         str      # POC | HVN | LVN | VA_HIGH | VA_LOW
 
 @dataclass(frozen=True)
 class VolumeProfileResult:
-    poc:           float    # Point of Control
-    va_high:       float    # Value Area High
-    va_low:        float    # Value Area Low
-    hvn_levels:    tuple[float, ...]    # High Volume Nodes
-    lvn_levels:    tuple[float, ...]    # Low Volume Nodes
+    poc:           float
+    va_high:       float
+    va_low:        float
+    hvn_levels:    tuple[float, ...]
+    lvn_levels:    tuple[float, ...]
     total_volume:  float
     price_range:   tuple[float, float]
-    institutional_bias: str    # "BULLISH" | "BEARISH" | "NEUTRAL"
-    support_from_poc:   float  # distance from current price to POC
+    institutional_bias: str
+    support_from_poc:   float
     resistance_from_poc: float
+
 
 def compute_volume_profile(
     df: pd.DataFrame,
     lookback: int = 60,
 ) -> VolumeProfileResult:
-    """
-    Compute volume profile over last *lookback* bars.
-
-    Parameters
-    ----------
-    df       : OHLCV DataFrame
-    lookback : number of bars to include
-    """
-    data   = df.iloc[-lookback:].copy()
-    close  = float(data["Close"].iloc[-1])
-    hi     = float(data["High"].max())
-    lo     = float(data["Low"].min())
+    data = df.iloc[-lookback:].copy()
+    close = float(data["Close"].iloc[-1])
+    hi = float(data["High"].max())
+    lo = float(data["Low"].min())
 
     if hi <= lo:
         hi = lo * 1.01
 
-    bins   = np.linspace(lo, hi, N_BINS + 1)
+    bins = np.linspace(lo, hi, N_BINS + 1)
     bucket_volume = np.zeros(N_BINS)
+    bucket_mid = (bins[:-1] + bins[1:]) / 2
 
+    # Vectorised volume distribution using weighted histogram per bar
+    # Instead of nested loops, we iterate over bars (still necessary because of overlap calculation)
+    # but inner loop is minimised by using `searchsorted` to find bin range.
     for _, row in data.iterrows():
-        bar_lo, bar_hi = float(row["Low"]), float(row["High"])
-        vol = float(row["Volume"])
-        for i in range(N_BINS):
-            overlap_lo = max(bar_lo, bins[i])
-            overlap_hi = min(bar_hi, bins[i + 1])
-            if overlap_hi > overlap_lo:
-                bucket_vol = vol * (overlap_hi - overlap_lo) / (bar_hi - bar_lo + 1e-9)
-                bucket_volume[i] += bucket_vol
+        bar_lo = row["Low"]
+        bar_hi = row["High"]
+        vol = row["Volume"]
+        bar_range = bar_hi - bar_lo
+        if bar_range <= 0:
+            continue
 
-    bucket_mid   = (bins[:-1] + bins[1:]) / 2
+        # Find indices of bins that overlap with this bar
+        left_idx = np.searchsorted(bins, bar_lo, side='right') - 1
+        right_idx = np.searchsorted(bins, bar_hi, side='left')
+        left_idx = max(0, left_idx)
+        right_idx = min(N_BINS, right_idx)
+
+        for i in range(left_idx, right_idx):
+            overlap_lo = max(bar_lo, bins[i])
+            overlap_hi = min(bar_hi, bins[i+1])
+            overlap = overlap_hi - overlap_lo
+            if overlap > 0:
+                bucket_volume[i] += vol * overlap / bar_range
+
     total_volume = float(bucket_volume.sum())
 
     if total_volume <= 0:
-        # Fallback when volume data is missing
-        poc = close
         return VolumeProfileResult(
-            poc=poc, va_high=poc*1.02, va_low=poc*0.98,
-            hvn_levels=(poc,), lvn_levels=(),
+            poc=close, va_high=close*1.02, va_low=close*0.98,
+            hvn_levels=(close,), lvn_levels=(),
             total_volume=0, price_range=(lo, hi),
             institutional_bias="NEUTRAL",
             support_from_poc=0, resistance_from_poc=0,
         )
 
-    # POC
     poc_idx = int(np.argmax(bucket_volume))
-    poc     = round(float(bucket_mid[poc_idx]), 4)
+    poc = round(float(bucket_mid[poc_idx]), 4)
 
-    # Value Area (expand from POC until 70% of volume)
+    # Value Area expansion (still requires loop because expansion order depends on volume)
     va_lo_idx = poc_idx
     va_hi_idx = poc_idx
     va_volume = float(bucket_volume[poc_idx])
@@ -12194,31 +12157,31 @@ def compute_volume_profile(
         add_lo = float(bucket_volume[va_lo_idx - 1]) if va_lo_idx > 0 else 0
         add_hi = float(bucket_volume[va_hi_idx + 1]) if va_hi_idx < N_BINS - 1 else 0
         if add_lo > add_hi and va_lo_idx > 0:
-            va_lo_idx -= 1; va_volume += add_lo
+            va_lo_idx -= 1
+            va_volume += add_lo
         elif va_hi_idx < N_BINS - 1:
-            va_hi_idx += 1; va_volume += add_hi
+            va_hi_idx += 1
+            va_volume += add_hi
         else:
             break
 
     va_high = round(float(bucket_mid[va_hi_idx]), 4)
-    va_low  = round(float(bucket_mid[va_lo_idx]), 4)
+    va_low = round(float(bucket_mid[va_lo_idx]), 4)
 
-    # HVN (> 1.5× average) and LVN (< 0.5× average)
     avg_vol = total_volume / N_BINS
     hvn = tuple(round(float(bucket_mid[i]), 4) for i in range(N_BINS)
                 if bucket_volume[i] >= avg_vol * 1.5)
     lvn = tuple(round(float(bucket_mid[i]), 4) for i in range(N_BINS)
                 if 0 < bucket_volume[i] <= avg_vol * 0.5)
 
-    # Institutional bias: where is price relative to POC + VA?
     if close > va_high:
-        bias = "BULLISH"   # price above value area — buyers in control
+        bias = "BULLISH"
     elif close < va_low:
-        bias = "BEARISH"   # price below value area — sellers in control
+        bias = "BEARISH"
     else:
         bias = "NEUTRAL"
 
-    support_from_poc    = round(close - poc, 4) if close >= poc else 0
+    support_from_poc = round(close - poc, 4) if close >= poc else 0
     resistance_from_poc = round(poc - close, 4) if close < poc else 0
 
     logger.info("[vol_profile] POC=%.2f VA=[%.2f-%.2f] bias=%s HVN=%d LVN=%d",
@@ -12232,8 +12195,7 @@ def compute_volume_profile(
         institutional_bias=bias,
         support_from_poc=support_from_poc,
         resistance_from_poc=resistance_from_poc,
-    )
-=== ./engines/portfolio_optimizer_v3.py ===
+    )=== ./engines/portfolio_optimizer_v3.py ===
 """
 Portfolio Optimizer V3 – Risk Parity, MinVar, Max Sharpe, Kelly
 """
@@ -13420,22 +13382,18 @@ def check_structure_consistency(
     )
 === ./market_structure/swing_detector.py ===
 """
-Swing High / Swing Low Detector
-================================
-ใช้ rolling window เพื่อหา swing high และ swing low บน Daily timeframe.
-
-Swing High: high[i] > max(high[i-n:i]) AND high[i] > max(high[i+1:i+n+1])
-Swing Low : low[i]  < min(low[i-n:i])  AND low[i]  < min(low[i+1:i+n+1])
+Swing High / Swing Low Detector – Vectorised version
 """
 from __future__ import annotations
 import logging
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
+from scipy.signal import argrelextrema
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_WINDOW = 5   # bars on each side
+DEFAULT_WINDOW = 5
 
 
 @dataclass(frozen=True)
@@ -13443,36 +13401,30 @@ class SwingPoint:
     index:  int
     date:   str
     price:  float
-    kind:   str   # "HIGH" | "LOW"
+    kind:   str
 
 
 def detect_swings(df: pd.DataFrame, window: int = DEFAULT_WINDOW) -> tuple[list[SwingPoint], list[SwingPoint]]:
     """
-    Detect swing highs and swing lows in df.
-
-    Returns
-    -------
-    (swing_highs, swing_lows) — each sorted ascending by index
+    Detect swing highs and lows using scipy.signal.argrelextrema.
+    Much faster than manual loop for large data.
     """
-    highs: list[SwingPoint] = []
-    lows:  list[SwingPoint] = []
-
-    n = len(df)
     high_arr = df["High"].to_numpy()
-    low_arr  = df["Low"].to_numpy()
-    dates    = df.index.astype(str).tolist()
+    low_arr = df["Low"].to_numpy()
+    dates = df.index.astype(str).tolist()
 
-    for i in range(window, n - window):
-        left_high  = high_arr[i - window: i]
-        right_high = high_arr[i + 1: i + window + 1]
-        left_low   = low_arr[i - window: i]
-        right_low  = low_arr[i + 1: i + window + 1]
+    # Find local maxima (swing highs)
+    swing_high_idx = argrelextrema(high_arr, np.greater, order=window)[0]
+    swing_low_idx = argrelextrema(low_arr, np.less, order=window)[0]
 
-        if high_arr[i] > left_high.max() and high_arr[i] > right_high.max():
-            highs.append(SwingPoint(index=i, date=dates[i], price=float(high_arr[i]), kind="HIGH"))
-
-        if low_arr[i] < left_low.min() and low_arr[i] < right_low.min():
-            lows.append(SwingPoint(index=i, date=dates[i], price=float(low_arr[i]), kind="LOW"))
+    highs = [
+        SwingPoint(index=int(i), date=dates[i], price=float(high_arr[i]), kind="HIGH")
+        for i in swing_high_idx
+    ]
+    lows = [
+        SwingPoint(index=int(i), date=dates[i], price=float(low_arr[i]), kind="LOW")
+        for i in swing_low_idx
+    ]
 
     return highs, lows
 
@@ -13482,23 +13434,15 @@ def get_recent_swings(
     window: int = DEFAULT_WINDOW,
     n_recent: int = 5,
 ) -> dict:
-    """
-    Return the most recent swing highs and lows as a dict.
-
-    Keys: recent_highs, recent_lows,
-          last_swing_high (SwingPoint | None),
-          last_swing_low  (SwingPoint | None)
-    """
     highs, lows = detect_swings(df, window)
     return {
         "recent_highs":    highs[-n_recent:],
         "recent_lows":     lows[-n_recent:],
         "last_swing_high": highs[-1] if highs else None,
-        "last_swing_low":  lows[-1]  if lows  else None,
+        "last_swing_low":  lows[-1] if lows else None,
         "all_highs":       highs,
         "all_lows":        lows,
-    }
-=== ./regime/__init__.py ===
+    }=== ./regime/__init__.py ===
 === ./regime/markov.py ===
 """
 Markov Regime Detection Engine
@@ -14712,7 +14656,91 @@ def safe_run(func, *args, default=None, **kwargs):
     except Exception as exc:
         logger.error(f"[safe_run] {func.__name__}: {exc}")
         return default
-=== ./utils/sheets_auth.py ===
+=== ./utils/batch_writer.py ===
+"""
+Batch Google Sheets Writer – Collects rows per sheet and writes once per run.
+"""
+import logging
+from typing import Dict, List, Any
+
+from utils.sheets_auth import get_sheets_client
+from config.config import SHEET_ID
+
+logger = logging.getLogger(__name__)
+
+
+class BatchWriter:
+    """Singleton batch writer for Google Sheets."""
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self._buffers: Dict[str, List[List[Any]]] = {}
+        self._headers: Dict[str, List[str]] = {}
+        self._client = None
+
+    def _get_client(self):
+        if self._client is None:
+            self._client = get_sheets_client()
+        return self._client
+
+    def add_row(self, sheet_name: str, row: List[Any], headers: List[str]):
+        """Add a row to the buffer for the given sheet."""
+        if sheet_name not in self._buffers:
+            self._buffers[sheet_name] = []
+            self._headers[sheet_name] = headers
+        self._buffers[sheet_name].append(row)
+
+    def flush(self):
+        """Write all buffered rows to Google Sheets."""
+        if not self._buffers:
+            logger.info("[BatchWriter] No buffered rows to flush.")
+            return
+
+        gc = self._get_client()
+        sh = gc.open_by_key(SHEET_ID)
+
+        for sheet_name, rows in self._buffers.items():
+            try:
+                ws = sh.worksheet(sheet_name)
+                # Ensure headers
+                first_row = ws.row_values(1)
+                if not first_row or first_row[0] != self._headers[sheet_name][0]:
+                    ws.insert_row(self._headers[sheet_name], index=1)
+                # Append rows in one batch
+                if rows:
+                    ws.append_rows(rows, value_input_option="USER_ENTERED")
+                    logger.info(f"[BatchWriter] Flushed {len(rows)} rows to {sheet_name}")
+            except Exception as e:
+                logger.error(f"[BatchWriter] Failed to flush {sheet_name}: {e}")
+
+        # Clear buffers after flush
+        self._buffers.clear()
+        self._headers.clear()
+
+    def clear(self):
+        """Clear buffers without writing."""
+        self._buffers.clear()
+        self._headers.clear()
+
+
+# Global singleton instance
+_batch_writer = None
+
+
+def get_batch_writer() -> BatchWriter:
+    global _batch_writer
+    if _batch_writer is None:
+        _batch_writer = BatchWriter()
+    return _batch_writer=== ./utils/sheets_auth.py ===
 """
 Shared Google Sheets authentication helper.
 Single source of truth — imported by symbol_loader and sheet_writer.
@@ -16813,36 +16841,12 @@ def get_atr_result(df: pd.DataFrame, period: int = 14) -> ATRResult:
     return ATRResult(atr14=round(atr, 4), atr_pct=round(pct, 2), volatility=vol)
 === ./simulation/monte_carlo.py ===
 """
-Monte Carlo Simulation Engine
-===============================
-Geometric Brownian Motion simulation — 10,000 paths minimum
-
-Inputs:
-  close_series   : pd.Series of historical closing prices
-  horizon        : forward-looking days (default = 20)
-  simulations    : number of GBM paths  (default = 10,000)
-  entry          : trade entry price
-  stop_loss      : stop loss level
-  target         : take profit target
-  direction      : "LONG" or "SHORT" – required for correct stop logic
-  win_rate       : historical win rate for EV/Kelly weighting
-
-Outputs (MonteCarloResult):
-  prob_profit          — probability path closes above entry
-  prob_stop_hit        — probability path touches stop loss
-  prob_target_hit      — probability path reaches target
-  expected_return_pct  — mean return at horizon (%)
-  expected_drawdown_pct— mean max drawdown (%)
-  ci_95_low / high     — 95% confidence interval of final returns
-  var_95               — Value-at-Risk at 95% (% of capital)
-  cvar_95              — Conditional VaR (Expected Shortfall)
-  sharpe_simulated     — simulated Sharpe ratio
-  sortino_simulated    — simulated Sortino ratio
+Monte Carlo Simulation Engine – with caching
 """
-
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -16854,26 +16858,40 @@ logger = logging.getLogger(__name__)
 
 N_SIMULATIONS  = 10_000
 DEFAULT_HORIZON = 20
-RISK_FREE_DAILY = 0.05 / 252   # annualised 5% → daily
+RISK_FREE_DAILY = 0.05 / 252
+
+# Cache for volatility parameters per symbol (24h TTL)
+_MC_CACHE = {}  # symbol -> (mu, sigma, timestamp)
+
+
+def _get_vol_params(close_series: pd.Series, symbol: str, ttl_seconds: int = 86400):
+    now = time.time()
+    if symbol in _MC_CACHE:
+        mu, sigma, ts = _MC_CACHE[symbol]
+        if now - ts < ttl_seconds:
+            return mu, sigma
+    log_returns = np.log(close_series / close_series.shift(1)).dropna()
+    mu = float(log_returns.mean())
+    sigma = float(log_returns.std())
+    if sigma <= 0:
+        sigma = 0.01
+    _MC_CACHE[symbol] = (mu, sigma, now)
+    return mu, sigma
 
 
 @dataclass(frozen=True)
 class MonteCarloResult:
     simulations:          int
     horizon:              int
-
-    prob_profit:          float   # % paths finishing > entry
-    prob_stop_hit:        float   # % paths touching SL
-    prob_target_hit:      float   # % paths reaching target
-    expected_return_pct:  float   # mean final return (%)
-    expected_drawdown_pct: float  # mean max drawdown (%)
-
-    ci_95_low:            float   # 2.5th percentile return (%)
-    ci_95_high:           float   # 97.5th percentile return (%)
-
-    var_95:               float   # -VaR at 95% (positive number, % loss)
-    cvar_95:              float   # -CVaR at 95% (Expected Shortfall, % loss)
-
+    prob_profit:          float
+    prob_stop_hit:        float
+    prob_target_hit:      float
+    expected_return_pct:  float
+    expected_drawdown_pct: float
+    ci_95_low:            float
+    ci_95_high:           float
+    var_95:               float
+    cvar_95:              float
     sharpe_simulated:     float
     sortino_simulated:    float
 
@@ -16885,91 +16903,55 @@ def run_monte_carlo(
     target:       float,
     horizon:      int   = DEFAULT_HORIZON,
     simulations:  int   = N_SIMULATIONS,
-    direction:    str   = "LONG",      # "LONG" or "SHORT"
+    direction:    str   = "LONG",
+    symbol:       str   = "default",
 ) -> MonteCarloResult:
-    """
-    Run GBM Monte Carlo simulation and return risk/probability statistics.
-
-    Parameters
-    ----------
-    close_series : historical closing prices (pd.Series)
-    entry        : trade entry price
-    stop_loss    : stop loss level
-    target       : profit target level
-    horizon      : number of trading days to simulate
-    simulations  : number of GBM paths
-    direction    : "LONG" or "SHORT" – determines stop and target logic
-    """
-
-    # ── Calibrate from historical returns ────────────────────────────────────
-    log_returns = np.log(close_series / close_series.shift(1)).dropna()
-    mu    = float(log_returns.mean())
-    sigma = float(log_returns.std())
-
-    if sigma <= 0:
-        sigma = 0.01   # fallback
-
-    # GBM drift-adjusted mean
+    # Use cached mu, sigma
+    mu, sigma = _get_vol_params(close_series, symbol)
     drift = mu - 0.5 * sigma ** 2
 
-    # ── Simulate paths (simulations × horizon) ───────────────────────────────
     rng    = np.random.default_rng(42)
     shocks = rng.normal(drift, sigma, size=(simulations, horizon))
-    log_paths = np.cumsum(shocks, axis=1)   # shape (simulations, horizon)
-
-    # Price paths relative to entry
-    price_paths = entry * np.exp(log_paths)  # shape (simulations, horizon)
+    log_paths = np.cumsum(shocks, axis=1)
+    price_paths = entry * np.exp(log_paths)
     final_prices = price_paths[:, -1]
 
-    # ── Returns ───────────────────────────────────────────────────────────────
-    # Subtract transaction costs: assume round-trip cost = 0.1% for this generic MC
     if THRESHOLDS.MODEL_TRANSACTION_COSTS:
-        # Use a conservative 0.05% each way (0.1% round-trip)
         cost_pct = THRESHOLDS.COST_STOCK_PCT * 2
     else:
         cost_pct = 0.0
 
     final_returns_pct = (final_prices - entry) / entry * 100 - cost_pct * 100
 
-    # ── Probabilities ─────────────────────────────────────────────────────────
-    prob_profit = 0.0
     if direction.upper() == "LONG":
         prob_profit = float((final_prices > entry).mean() * 100)
         stop_touched = (price_paths.min(axis=1) <= stop_loss)
         target_touched = (price_paths.max(axis=1) >= target)
-    else:  # SHORT
+    else:
         prob_profit = float((final_prices < entry).mean() * 100)
         stop_touched = (price_paths.max(axis=1) >= stop_loss)
         target_touched = (price_paths.min(axis=1) <= target)
 
     prob_stop_hit = float(stop_touched.mean() * 100)
     prob_target_hit = float(target_touched.mean() * 100)
-
-    # ── Expected return + drawdown ────────────────────────────────────────────
     expected_return = float(final_returns_pct.mean())
 
-    # Max drawdown per path: (peak - trough) / peak
-    running_max  = np.maximum.accumulate(price_paths, axis=1)
+    running_max = np.maximum.accumulate(price_paths, axis=1)
     drawdown_per_path = ((price_paths - running_max) / running_max).min(axis=1)
-    expected_dd  = float(drawdown_per_path.mean() * 100)
+    expected_dd = float(drawdown_per_path.mean() * 100)
 
-    # ── Confidence interval ───────────────────────────────────────────────────
-    ci_low  = float(np.percentile(final_returns_pct, 2.5))
+    ci_low = float(np.percentile(final_returns_pct, 2.5))
     ci_high = float(np.percentile(final_returns_pct, 97.5))
+    var_95 = float(-np.percentile(final_returns_pct, 5))
+    tail = final_returns_pct[final_returns_pct <= np.percentile(final_returns_pct, 5)]
+    cvar_95 = float(-tail.mean()) if len(tail) > 0 else var_95
 
-    # ── VaR & CVaR (95%) ─────────────────────────────────────────────────────
-    var_95   = float(-np.percentile(final_returns_pct, 5))    # positive = loss
-    tail     = final_returns_pct[final_returns_pct <= np.percentile(final_returns_pct, 5)]
-    cvar_95  = float(-tail.mean()) if len(tail) > 0 else var_95
-
-    # ── Simulated Sharpe & Sortino ────────────────────────────────────────────
-    daily_path_returns = np.diff(np.log(price_paths), axis=1)   # (sim, horizon-1)
+    daily_path_returns = np.diff(np.log(price_paths), axis=1)
     mean_daily = daily_path_returns.mean(axis=1)
-    std_daily  = daily_path_returns.std(axis=1)
-
-    excess_daily    = mean_daily - RISK_FREE_DAILY
+    std_daily = daily_path_returns.std(axis=1)
+    excess_daily = mean_daily - RISK_FREE_DAILY
     sharpe_per_path = np.where(std_daily > 0, excess_daily / std_daily * np.sqrt(252), 0)
-    sharpe_sim      = float(sharpe_per_path.mean())
+    sharpe_sim = float(sharpe_per_path.mean())
 
     downside = np.where(daily_path_returns < 0, daily_path_returns, 0)
     downside_std = downside.std(axis=1)
@@ -16982,26 +16964,26 @@ def run_monte_carlo(
 
     logger.info(
         "MC[%d paths, %dd, %s]  P(profit)=%.1f%%  P(SL)=%.1f%%  P(TP)=%.1f%%  "
-        "E[ret]=%.2f%%  VaR95=%.2f%%  cost=%.3f%%",
+        "E[ret]=%.2f%%  VaR95=%.2f%%  cost=%.3f%% (cached params)",
         simulations, horizon, direction,
         prob_profit, prob_stop_hit, prob_target_hit,
         expected_return, var_95, cost_pct * 100,
     )
 
     return MonteCarloResult(
-        simulations           = simulations,
-        horizon               = horizon,
-        prob_profit           = round(prob_profit, 1),
-        prob_stop_hit         = round(prob_stop_hit, 1),
-        prob_target_hit       = round(prob_target_hit, 1),
-        expected_return_pct   = round(expected_return, 2),
-        expected_drawdown_pct = round(expected_dd, 2),
-        ci_95_low             = round(ci_low, 2),
-        ci_95_high            = round(ci_high, 2),
-        var_95                = round(var_95, 2),
-        cvar_95               = round(cvar_95, 2),
-        sharpe_simulated      = round(sharpe_sim, 3),
-        sortino_simulated     = round(sortino_sim, 3),
+        simulations=simulations,
+        horizon=horizon,
+        prob_profit=round(prob_profit, 1),
+        prob_stop_hit=round(prob_stop_hit, 1),
+        prob_target_hit=round(prob_target_hit, 1),
+        expected_return_pct=round(expected_return, 2),
+        expected_drawdown_pct=round(expected_dd, 2),
+        ci_95_low=round(ci_low, 2),
+        ci_95_high=round(ci_high, 2),
+        var_95=round(var_95, 2),
+        cvar_95=round(cvar_95, 2),
+        sharpe_simulated=round(sharpe_sim, 3),
+        sortino_simulated=round(sortino_sim, 3),
     )=== ./simulation/__init__.py ===
 === ./simulation/portfolio_risk.py ===
 """
@@ -17510,26 +17492,8 @@ def build_execution_report_v3(
 
     return "\n".join(lines)=== ./reports/sheet_writer_v2.py ===
 """
-Google Sheets Writer  v2  (Phases 12–21 Integration)
-======================================================
-Extends sheet_writer.py with 3 new worksheets and extended columns for
-all institutional engine outputs. Existing sheets (TradeSignals, Options,
-MarketData) are UNCHANGED — v2 adds parallel institutional sheets.
-
-New Sheets:
-  InstitutionalSignals  — per-run institutional snapshot (primary new sheet)
-  RegimeDashboard       — regime + persistence + breadth + liquidity history
-  FlowSnapshot          — derivatives flow history
-
-Usage (drop-in alongside existing writers):
-  from reports.sheet_writer_v2 import log_institutional_signals
-
-  Call AFTER log_trade_signals() in pipeline / orchestrator_v2.
-
-All writes are safe-wrapped — sheet failure never crashes the pipeline.
+Google Sheets Writer v2 – Batched version
 """
-from __future__ import annotations
-
 import logging
 import math
 from datetime import datetime
@@ -17537,17 +17501,16 @@ from typing import Optional
 
 from config.config import SHEET_ID
 from utils.sheets_auth import get_sheets_client
+from utils.batch_writer import get_batch_writer
 
 logger = logging.getLogger(__name__)
 
 
-# ── Helpers (mirror existing pattern) ─────────────────────────────────────────
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _safe(v) -> str | float | int:
-    """Convert any value to a Google Sheets-safe scalar."""
     if v is None:
         return ""
     if isinstance(v, bool):
@@ -17572,40 +17535,26 @@ def _ensure_headers(ws, headers: list[str]) -> None:
         logger.debug("[sheet_v2] header check: %s", exc)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SHEET 1: InstitutionalSignals
-# Full per-run snapshot of all new engine outputs
-# ══════════════════════════════════════════════════════════════════════════════
 _INST_HEADERS = [
-    # Identity
     "Timestamp", "Symbol", "Price",
-    # Core (carried over for cross-reference)
     "Regime", "RegimeConf", "VolRegime", "FinalDecision",
     "AIScore", "TradeGrade", "Approved",
-    # Phase 12: Liquidity
     "LiquidityRegime", "LiquidityScore", "LiquidityRiskMult",
     "VIXLevel", "DXYTrend", "YieldTrend",
-    # Phase 13: Flow
     "FlowRegime", "FlowScore", "FlowDirection",
     "FundingRate", "LSRatio", "OISignal", "CascadeRisk",
-    # Phase 14: Breadth
     "BreadthRegime", "BreadthScore", "BreadthConf",
     "BTCDomEst", "TOTAL3Change", "ADRatio", "PctAbove200DMA",
-    # Phase 15: Persistence
     "PersistenceLabel", "PersistenceScore",
     "ExpectedDuration", "RemainingDays", "HalfLifeDays",
     "ExitProb7d", "ExitProb14d", "MostLikelyNext",
-    # Phase 17: Forecast
     "ForecastDirection", "ForecastConf", "ModelUsed",
     "Return5d", "ProbUp5d",
     "Return10d", "ProbUp10d",
     "Return20d", "ProbUp20d",
-    # Phase 18: Conviction
     "ConvictionScore", "ConvictionTier", "KellyMult",
     "TradeAllowed", "WeakestSignal", "StrongestSignal", "AlignedCount",
-    # Phase 20: Portfolio
     "PortfolioVol", "PortfolioSharpe", "PortfolioDD", "DivRatio",
-    # Phase 21: Cross-Asset
     "CrossAssetRegime", "CrossAssetConf", "RSScore",
     "BtcBetaSPY", "BtcBetaQQQ", "DecouplingDetected",
     "CorrQQQ", "CorrSPY", "CorrDXY", "CorrGLD",
@@ -17615,24 +17564,18 @@ _INST_HEADERS = [
 def log_institutional_signals(
     symbol:    str,
     price:     float,
-    result_v2,                 # FuturesResult_v2
-    liquidity  = None,         # LiquidityRegimeResult
-    flow       = None,         # FlowEngineResult
-    breadth    = None,         # MarketBreadthResult
-    persistence= None,         # RegimePersistenceResult
-    forecast   = None,         # ForecastResult
-    conviction = None,         # ConvictionResult
-    portfolio  = None,         # PortfolioOptimizationResult
-    cross_asset= None,         # CrossAssetResult
+    result_v2,
+    liquidity  = None,
+    flow       = None,
+    breadth    = None,
+    persistence= None,
+    forecast   = None,
+    conviction = None,
+    portfolio  = None,
+    cross_asset= None,
 ) -> None:
-    """
-    Append one row to the InstitutionalSignals worksheet.
-    All parameters optional — missing values write empty string.
-    Never raises — failure is logged and silently swallowed.
-    """
-    r = result_v2  # shorthand
+    r = result_v2
 
-    # ── Liquidity fields ──────────────────────────────────────────────────────
     liq_regime  = _safe(getattr(liquidity, "liquidity_regime",  getattr(r, "liquidity_regime",  "")))
     liq_score   = _safe(getattr(liquidity, "score",             getattr(r, "liquidity_score",   "")))
     liq_mult    = _safe(getattr(liquidity, "risk_multiplier",   getattr(r, "liquidity_risk_mult","")))
@@ -17640,7 +17583,6 @@ def log_institutional_signals(
     dxy_trend   = _safe(getattr(liquidity, "dxy_trend",   ""))
     yield_trend = _safe(getattr(liquidity, "yield_trend", ""))
 
-    # ── Flow fields ───────────────────────────────────────────────────────────
     fl_regime  = _safe(getattr(flow, "flow_regime",    getattr(r, "flow_regime",    "")))
     fl_score   = _safe(getattr(flow, "flow_score",     getattr(r, "flow_score",     "")))
     fl_dir     = _safe(getattr(flow, "flow_direction", getattr(r, "flow_direction", "")))
@@ -17649,7 +17591,6 @@ def log_institutional_signals(
     fl_oi      = _safe(getattr(flow, "oi_signal",        ""))
     fl_casc    = _safe(getattr(flow, "cascade_risk",     ""))
 
-    # ── Breadth fields ────────────────────────────────────────────────────────
     br_regime  = _safe(getattr(breadth, "breadth_regime",     getattr(r, "breadth_regime",  "")))
     br_score   = _safe(getattr(breadth, "breadth_score",      getattr(r, "breadth_score",   "")))
     br_conf    = _safe(getattr(breadth, "breadth_confidence", ""))
@@ -17660,7 +17601,6 @@ def log_institutional_signals(
     br_ad      = _safe(getattr(eb, "advance_decline_ratio",""))
     br_200     = _safe(getattr(eb, "pct_above_200dma",    ""))
 
-    # ── Persistence fields ────────────────────────────────────────────────────
     pe_label   = _safe(getattr(persistence, "persistence_label",       getattr(r, "persistence_label", "")))
     pe_score   = _safe(getattr(persistence, "persistence_score",       ""))
     pe_exp     = _safe(getattr(persistence, "expected_duration_days",  ""))
@@ -17670,7 +17610,6 @@ def log_institutional_signals(
     pe_ex14    = _safe(getattr(persistence, "exit_prob_14d",           ""))
     pe_next    = _safe(getattr(persistence, "most_likely_next",        ""))
 
-    # ── Forecast fields ───────────────────────────────────────────────────────
     fc_dir     = _safe(getattr(forecast, "forecast_direction",  getattr(r, "forecast_direction",  "")))
     fc_conf    = _safe(getattr(forecast, "forecast_confidence", getattr(r, "forecast_confidence", "")))
     fc_model   = _safe(getattr(forecast, "model_used",          ""))
@@ -17682,7 +17621,6 @@ def log_institutional_signals(
     fc_r20     = _safe(hf.get("20d", {}).get("return_pct", getattr(r, "forecast_20d_return", "")))
     fc_p20     = _safe(hf.get("20d", {}).get("prob_up",    getattr(forecast, "probability_up_20d", "")))
 
-    # ── Conviction fields ─────────────────────────────────────────────────────
     cv_score   = _safe(getattr(conviction, "conviction_score",   getattr(r, "conviction_score",   "")))
     cv_tier    = _safe(getattr(conviction, "conviction_tier",    getattr(r, "conviction_tier",    "")))
     cv_kelly   = _safe(getattr(conviction, "kelly_multiplier",   getattr(r, "conviction_kelly_mult","")))
@@ -17691,13 +17629,11 @@ def log_institutional_signals(
     cv_strong  = _safe(getattr(conviction, "strongest_signal",   ""))
     cv_aligned = _safe(getattr(conviction, "alignment_count",    ""))
 
-    # ── Portfolio fields ──────────────────────────────────────────────────────
     po_vol     = _safe(getattr(portfolio, "portfolio_volatility",  getattr(r, "portfolio_vol",      "")))
     po_sharpe  = _safe(getattr(portfolio, "portfolio_sharpe",      getattr(r, "portfolio_sharpe",   "")))
     po_dd      = _safe(getattr(portfolio, "portfolio_drawdown",    getattr(r, "portfolio_drawdown", "")))
     po_div     = _safe(getattr(portfolio, "diversification_ratio", ""))
 
-    # ── Cross-asset fields ────────────────────────────────────────────────────
     ca_regime  = _safe(getattr(cross_asset, "cross_asset_regime",       getattr(r, "cross_asset_regime","" )))
     ca_conf    = _safe(getattr(cross_asset, "regime_confidence",         ""))
     ca_rs      = _safe(getattr(cross_asset, "relative_strength_score",  getattr(r, "btc_rs_score",    "")))
@@ -17719,38 +17655,24 @@ def log_institutional_signals(
         _safe(getattr(r, "ai_score", "")),
         _safe(getattr(r, "trade_grade", "")),
         _safe(getattr(r, "approved", "")),
-        # Liquidity
         liq_regime, liq_score, liq_mult, vix_level, dxy_trend, yield_trend,
-        # Flow
         fl_regime, fl_score, fl_dir, fl_fr, fl_ls, fl_oi, fl_casc,
-        # Breadth
         br_regime, br_score, br_conf, br_btcd, br_t3, br_ad, br_200,
-        # Persistence
         pe_label, pe_score, pe_exp, pe_remain, pe_hl, pe_ex7, pe_ex14, pe_next,
-        # Forecast
         fc_dir, fc_conf, fc_model, fc_r5, fc_p5, fc_r10, fc_p10, fc_r20, fc_p20,
-        # Conviction
         cv_score, cv_tier, cv_kelly, cv_allow, cv_weak, cv_strong, cv_aligned,
-        # Portfolio
         po_vol, po_sharpe, po_dd, po_div,
-        # Cross-asset
         ca_regime, ca_conf, ca_rs, ca_bspy, ca_bqqq, ca_dec,
         ca_cqqq, ca_cspy, ca_cdxy, ca_cgld,
     ]
 
     try:
-        gc = get_sheets_client()
-        ws = gc.open_by_key(SHEET_ID).worksheet("InstitutionalSignals")
-        _ensure_headers(ws, _INST_HEADERS)
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        logger.info("[sheet_v2] InstitutionalSignals ← %s", symbol)
+        get_batch_writer().add_row("InstitutionalSignals", row, _INST_HEADERS)
+        logger.info(f"[sheet_v2] InstitutionalSignals ← {symbol} (batched)")
     except Exception as exc:
-        logger.error("[sheet_v2] InstitutionalSignals write failed (%s): %s", symbol, exc)
+        logger.error(f"[sheet_v2] InstitutionalSignals add failed ({symbol}): {exc}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SHEET 2: RegimeDashboard — lightweight daily regime history
-# ══════════════════════════════════════════════════════════════════════════════
 _REGIME_HEADERS = [
     "Timestamp", "Symbol",
     "Regime", "RegimeConf", "PersistenceLabel", "RemainingDays", "ExitProb7d",
@@ -17762,7 +17684,6 @@ _REGIME_HEADERS = [
 
 
 def log_regime_dashboard(symbol: str, result_v2) -> None:
-    """Append compact regime row for historical tracking."""
     r = result_v2
     row = [
         _now(), symbol,
@@ -17781,18 +17702,12 @@ def log_regime_dashboard(symbol: str, result_v2) -> None:
         _safe(getattr(r, "conviction_tier",     "")),
     ]
     try:
-        gc = get_sheets_client()
-        ws = gc.open_by_key(SHEET_ID).worksheet("RegimeDashboard")
-        _ensure_headers(ws, _REGIME_HEADERS)
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        logger.info("[sheet_v2] RegimeDashboard ← %s", symbol)
+        get_batch_writer().add_row("RegimeDashboard", row, _REGIME_HEADERS)
+        logger.info(f"[sheet_v2] RegimeDashboard ← {symbol} (batched)")
     except Exception as exc:
-        logger.error("[sheet_v2] RegimeDashboard write failed (%s): %s", symbol, exc)
+        logger.error(f"[sheet_v2] RegimeDashboard add failed ({symbol}): {exc}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SHEET 3: FlowSnapshot — derivatives flow history
-# ══════════════════════════════════════════════════════════════════════════════
 _FLOW_HEADERS = [
     "Timestamp", "Symbol", "Price",
     "FlowRegime", "FlowScore", "FlowDirection", "FlowConf",
@@ -17803,7 +17718,6 @@ _FLOW_HEADERS = [
 
 
 def log_flow_snapshot(symbol: str, price: float, flow) -> None:
-    """Append flow snapshot row for monitoring crowding & squeeze conditions."""
     if flow is None:
         return
     row = [
@@ -17817,18 +17731,12 @@ def log_flow_snapshot(symbol: str, price: float, flow) -> None:
         _safe(flow.ls_score),     _safe(flow.liq_score),
     ]
     try:
-        gc = get_sheets_client()
-        ws = gc.open_by_key(SHEET_ID).worksheet("FlowSnapshot")
-        _ensure_headers(ws, _FLOW_HEADERS)
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        logger.info("[sheet_v2] FlowSnapshot ← %s", symbol)
+        get_batch_writer().add_row("FlowSnapshot", row, _FLOW_HEADERS)
+        logger.info(f"[sheet_v2] FlowSnapshot ← {symbol} (batched)")
     except Exception as exc:
-        logger.error("[sheet_v2] FlowSnapshot write failed (%s): %s", symbol, exc)
+        logger.error(f"[sheet_v2] FlowSnapshot add failed ({symbol}): {exc}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MASTER WRITER — call once per run from orchestrator_v2
-# ══════════════════════════════════════════════════════════════════════════════
 def write_all_institutional(
     symbol:      str,
     price:       float,
@@ -17842,10 +17750,6 @@ def write_all_institutional(
     portfolio  = None,
     cross_asset= None,
 ) -> None:
-    """
-    Single call to write all three institutional sheets.
-    Safe — any individual sheet failure does not stop others.
-    """
     try:
         log_institutional_signals(
             symbol, price, result_v2,
@@ -17853,40 +17757,31 @@ def write_all_institutional(
             forecast, conviction, portfolio, cross_asset,
         )
     except Exception as exc:
-        logger.error("[sheet_v2] InstitutionalSignals failed: %s", exc)
+        logger.error(f"[sheet_v2] InstitutionalSignals failed: {exc}")
 
     try:
         log_regime_dashboard(symbol, result_v2)
     except Exception as exc:
-        logger.error("[sheet_v2] RegimeDashboard failed: %s", exc)
+        logger.error(f"[sheet_v2] RegimeDashboard failed: {exc}")
 
     try:
         log_flow_snapshot(symbol, price, flow)
     except Exception as exc:
-        logger.error("[sheet_v2] FlowSnapshot failed: %s", exc)
-=== ./reports/sheet_writer.py ===
+        logger.error(f"[sheet_v2] FlowSnapshot failed: {exc}")=== ./reports/sheet_writer.py ===
 """
-Google Sheets Writer
-=====================
-เขียนผลลัพธ์ signal + options ลง 2 ชีท:
-  • TradeSignals  — สัญญาณ directional + Greek overlay
-  • Options       — option strategy setup + Monte Carlo
+Google Sheets Writer – Batched version
 """
-
 import logging
 from datetime import datetime
 
 from config.config import SHEET_ID
 from utils.sheets_auth import get_sheets_client
+from utils.batch_writer import get_batch_writer
 
 logger = logging.getLogger(__name__)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ──────────────────────────────────────────────────────────────────────────────
 def _first(x) -> dict:
-    """คืน element แรกถ้าเป็น list หรือคืน dict ตรงๆ"""
     if isinstance(x, list) and x:
         return x[0]
     if isinstance(x, dict):
@@ -17899,13 +17794,12 @@ def _now() -> str:
 
 
 def _safe(v):
-    """Convert ค่าให้เป็น Google Sheets-safe scalar"""
     if v is None:
         return ""
     if isinstance(v, bool):
         return str(v)
     if isinstance(v, list):
-        return " | ".join(str(i) for i in v)   # conviction_reasons list → string
+        return " | ".join(str(i) for i in v)
     if isinstance(v, float):
         import math
         if math.isnan(v) or math.isinf(v):
@@ -17915,7 +17809,6 @@ def _safe(v):
 
 
 def _ensure_headers(ws, headers: list[str]) -> None:
-    """Insert header row ถ้ายังไม่มี"""
     try:
         first_row = ws.row_values(1)
         if not first_row or first_row[0] != headers[0]:
@@ -17924,15 +17817,6 @@ def _ensure_headers(ws, headers: list[str]) -> None:
         logger.warning(f"Header check failed: {exc}")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# TRADE SIGNALS SHEET
-# คอลัมน์: Timestamp | Symbol | AssetType | Regime | Position | Price |
-#          Entry | SL | TP1 | TP2 | Risk | HoldingDays |
-#          Conviction | ConvictionReasons | GreekStrategy |
-#          IVRank | IVEnv | SkewPC | AvgIV | PCOIRatio |
-#          DomDTE | NearTermRisk | AvgGamma | FastDecayPct |
-#          MC_Bull | MC_Bear | MC_Sideway
-# ──────────────────────────────────────────────────────────────────────────────
 _TRADE_HEADERS = [
     "Timestamp", "Symbol", "AssetType", "Regime", "Position", "Price",
     "Entry", "SL", "TP1", "TP2", "Risk", "HoldingDays",
@@ -17944,7 +17828,6 @@ _TRADE_HEADERS = [
 
 
 def log_trade_signals(symbol: str, signals: list | dict, monte: list | dict) -> None:
-
     s = _first(signals)
     m = _first(monte)
 
@@ -17962,7 +17845,7 @@ def log_trade_signals(symbol: str, signals: list | dict, monte: list | dict) -> 
         _safe(s.get("risk", "")),
         _safe(s.get("holding_days", "")),
         _safe(s.get("greek_conviction", "")),
-        _safe(s.get("conviction_reasons", [])),   # list → " | " string
+        _safe(s.get("conviction_reasons", [])),
         _safe(s.get("greek_strategy_hint", "")),
         _safe(s.get("iv_rank_proxy", "")),
         _safe(s.get("iv_environment", "")),
@@ -17979,22 +17862,12 @@ def log_trade_signals(symbol: str, signals: list | dict, monte: list | dict) -> 
     ]
 
     try:
-        gc = get_sheets_client()
-        ws = gc.open_by_key(SHEET_ID).worksheet("TradeSignals")
-        _ensure_headers(ws, _TRADE_HEADERS)
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        logger.info(f"[sheet_writer] TradeSignals ← {symbol}")
+        get_batch_writer().add_row("TradeSignals", row, _TRADE_HEADERS)
+        logger.info(f"[sheet_writer] TradeSignals ← {symbol} (batched)")
     except Exception as exc:
-        logger.error(f"[sheet_writer] TradeSignals write failed ({symbol}): {exc}")
-        raise
+        logger.error(f"[sheet_writer] TradeSignals add failed ({symbol}): {exc}")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# OPTIONS SHEET
-# คอลัมน์: Timestamp | Symbol | Strategy | Direction |
-#          Entry | Target | BuyCall | SellCall | BuyPut | SellPut |
-#          DTE | POP | MC_Bull | MC_Bear | MC_Sideway
-# ──────────────────────────────────────────────────────────────────────────────
 _OPTIONS_HEADERS = [
     "Timestamp", "Symbol", "Strategy", "Direction",
     "Entry", "Target", "BuyCall", "SellCall", "BuyPut", "SellPut",
@@ -18003,7 +17876,6 @@ _OPTIONS_HEADERS = [
 
 
 def log_options_signals(symbol: str, options: list | dict, monte: list | dict) -> None:
-
     o = _first(options)
     m = _first(monte)
 
@@ -18026,57 +17898,33 @@ def log_options_signals(symbol: str, options: list | dict, monte: list | dict) -
     ]
 
     try:
-        gc = get_sheets_client()
-        ws = gc.open_by_key(SHEET_ID).worksheet("Options")
-        _ensure_headers(ws, _OPTIONS_HEADERS)
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        logger.info(f"[sheet_writer] Options ← {symbol}")
+        get_batch_writer().add_row("Options", row, _OPTIONS_HEADERS)
+        logger.info(f"[sheet_writer] Options ← {symbol} (batched)")
     except Exception as exc:
-        logger.error(f"[sheet_writer] Options write failed ({symbol}): {exc}")
-        raise
+        logger.error(f"[sheet_writer] Options add failed ({symbol}): {exc}")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# MARKET DATA SHEET  (ใช้โดย pipeline.py)
-# ──────────────────────────────────────────────────────────────────────────────
 def write_market_data(rows: list[list]) -> None:
-    """Append raw market snapshot rows to the MarketData worksheet."""
+    if not rows:
+        return
+    headers = ["Timestamp", "Symbol", "Price", "Volume", "Return", "Volatility"]
     try:
-        gc = get_sheets_client()
-        ws = gc.open_by_key(SHEET_ID).worksheet("MarketData")
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
-        logger.info(f"[sheet_writer] MarketData ← {len(rows)} rows")
+        for row in rows:
+            get_batch_writer().add_row("MarketData", row, headers)
+        logger.info(f"[sheet_writer] MarketData ← {len(rows)} rows (batched)")
     except Exception as exc:
-        logger.error(f"[sheet_writer] MarketData write failed: {exc}")
-        raise
-=== ./reports/__init__.py ===
+        logger.error(f"[sheet_writer] MarketData add failed: {exc}")=== ./reports/__init__.py ===
 === ./reports/option_chain_writer.py ===
 """
-Option Chain Sheet Writer
-==========================
-Writes enriched option-chain rows (with Greeks) to the
-"Option_Chain" worksheet in Google Sheets.
-
-Performance strategy
---------------------
-• clear_symbol_rows() → uses batch-delete with a single values fetch,
-  then reverses indices — no row-by-row API calls.
-• write_option_chain() → single append_rows() call per symbol.
-
-Sheet schema (26 columns)
---------------------------
-Timestamp | Symbol | Source | Expiry | DTE | DTE_Bucket | Type
-Strike | Bid | Ask | Mid | Last | IV | Volume | OI | ITM
-Delta | Gamma | Theta | Vega | Rho
-Moneyness | High_Gamma | Theta_Category | Vega_Category | Direction_Bias
+Option Chain Sheet Writer – Batched version
 """
-
 import logging
 import math
 from datetime import datetime
 
 from config.config import SHEET_ID
 from utils.sheets_auth import get_sheets_client
+from utils.batch_writer import get_batch_writer
 
 logger = logging.getLogger(__name__)
 
@@ -18092,12 +17940,10 @@ HEADERS = [
     "Theta_Category", "Vega_Category", "Direction_Bias",
 ]
 
-# Column B (index 1) = Symbol
 _SYMBOL_COL_IDX = 1
 
 
 def _safe(v):
-    """Convert to a Google-Sheets-safe scalar."""
     if v is None:
         return ""
     if isinstance(v, bool):
@@ -18141,7 +17987,6 @@ def _row_from(ts: str, symbol: str, r: dict) -> list:
 
 
 def _ensure_headers(ws) -> None:
-    """Write header row if the sheet is empty or header is missing."""
     try:
         first = ws.row_values(1)
         if not first or first[0] != "Timestamp":
@@ -18152,56 +17997,33 @@ def _ensure_headers(ws) -> None:
 
 
 def write_option_chain(symbol: str, enriched_rows: list[dict]) -> int:
-    """
-    Append enriched option rows to the Option_Chain sheet.
-
-    Returns the number of rows written.
-    """
-
     if not enriched_rows:
         logger.info(f"[option_chain_writer] {symbol}: no rows to write")
         return 0
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    gc = get_sheets_client()
-    ws = gc.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
-    _ensure_headers(ws)
-
-    batch = [_row_from(ts, symbol, r) for r in enriched_rows]
-
     try:
-        ws.append_rows(batch, value_input_option="USER_ENTERED")
-        logger.info(f"[option_chain_writer] {symbol}: wrote {len(batch)} rows")
-        return len(batch)
+        for r in enriched_rows:
+            row = _row_from(ts, symbol, r)
+            get_batch_writer().add_row(SHEET_NAME, row, HEADERS)
+        logger.info(f"[option_chain_writer] {symbol}: added {len(enriched_rows)} rows to batch")
+        return len(enriched_rows)
     except Exception as exc:
-        logger.error(f"[option_chain_writer] {symbol}: write failed — {exc}")
-        raise
+        logger.error(f"[option_chain_writer] {symbol}: add failed — {exc}")
+        return 0
 
 
 def clear_symbol_rows(symbol: str) -> int:
-    """
-    Delete all existing data rows for *symbol* in one batch operation.
-
-    Strategy
-    --------
-    1. Fetch all values in one API call.
-    2. Collect 1-indexed row numbers where column B == symbol (skip header).
-    3. Delete in reverse order (bottom-up) to keep row indices stable.
-
-    Returns number of rows deleted.
-    """
-
     gc = get_sheets_client()
     ws = gc.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
     try:
-        all_values = ws.get_all_values()   # single API call
+        all_values = ws.get_all_values()
     except Exception as exc:
         logger.warning(f"[option_chain_writer] clear: read failed — {exc}")
         return 0
 
-    # Skip header row (index 0), find matching rows (1-indexed for Sheets API)
     to_delete = [
         i + 1
         for i, row in enumerate(all_values)
@@ -18213,7 +18035,6 @@ def clear_symbol_rows(symbol: str) -> int:
     if not to_delete:
         return 0
 
-    # Delete bottom-up so row indices don't shift
     deleted = 0
     for row_idx in reversed(to_delete):
         try:
@@ -18227,19 +18048,6 @@ def clear_symbol_rows(symbol: str) -> int:
 
 
 def overwrite_all_symbols(all_enriched: dict[str, list[dict]]) -> int:
-    """
-    Full refresh: clear ALL data rows and rewrite every symbol in one session.
-
-    More efficient than clear_symbol_rows() per symbol when processing many
-    symbols at once — only one `get_all_values()` call total.
-
-    Parameters
-    ----------
-    all_enriched : {symbol: [enriched_rows]}
-
-    Returns total rows written.
-    """
-
     if not all_enriched:
         return 0
 
@@ -18247,7 +18055,6 @@ def overwrite_all_symbols(all_enriched: dict[str, list[dict]]) -> int:
     ws = gc.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
     _ensure_headers(ws)
 
-    # Clear all data below header in one call
     try:
         last_row = ws.row_count
         if last_row > 1:
@@ -18267,8 +18074,7 @@ def overwrite_all_symbols(all_enriched: dict[str, list[dict]]) -> int:
 
     ws.append_rows(all_rows, value_input_option="USER_ENTERED")
     logger.info(f"[option_chain_writer] bulk write: {len(all_rows)} total rows")
-    return len(all_rows)
-=== ./reports/options_formatter.py ===
+    return len(all_rows)=== ./reports/options_formatter.py ===
 """
 Options LINE Message Formatter – Institutional Execution Style
 ================================================================
@@ -18885,14 +18691,14 @@ def format_report(
         "fail":    fail_count,
     }
 === ./reports/options_sheet_writer.py ===
-# reports/options_sheet_writer.py
-
+# reports/options_sheet_writer.py – Batched version
 import logging
 import math
 from datetime import datetime
 
 from config.config import SHEET_ID
 from utils.sheets_auth import get_sheets_client
+from utils.batch_writer import get_batch_writer
 
 logger = logging.getLogger(__name__)
 
@@ -18907,6 +18713,7 @@ HEADERS = [
     "Approved", "AIScore",
 ]
 
+
 def _safe(v):
     if v is None:
         return ""
@@ -18918,22 +18725,20 @@ def _safe(v):
         return "" if (math.isnan(v) or math.isinf(v)) else round(v, 5)
     return v
 
+
 def _ensure_worksheet(ws_name: str):
-    """Get or create the worksheet. Returns worksheet object."""
     gc = get_sheets_client()
     sh = gc.open_by_key(SHEET_ID)
     try:
         ws = sh.worksheet(ws_name)
     except Exception:
-        # Worksheet does not exist – create it
         ws = sh.add_worksheet(title=ws_name, rows=5000, cols=len(HEADERS))
         logger.info(f"[options_sheet_writer] Created worksheet '{ws_name}'")
-        # Add headers
         ws.update('A1', [HEADERS], value_input_option='USER_ENTERED')
     return ws
 
+
 def _ensure_headers(ws):
-    """Insert header row if the sheet is empty or first row is not header."""
     try:
         first_row = ws.row_values(1)
         if not first_row or first_row[0] != HEADERS[0]:
@@ -18942,11 +18747,8 @@ def _ensure_headers(ws):
     except Exception as exc:
         logger.warning(f"[options_sheet_writer] Header check failed: {exc}")
 
+
 def write_options_analysis(rec) -> None:
-    """
-    Append one row to the Options_Analysis worksheet.
-    Creates the worksheet if it does not exist.
-    """
     pri = rec.primary
     vol = rec.vol
     em = rec.em
@@ -18974,13 +18776,10 @@ def write_options_analysis(rec) -> None:
     ]
 
     try:
-        ws = _ensure_worksheet(SHEET_NAME)
-        _ensure_headers(ws)
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        logger.info(f"Options_Analysis ← {rec.symbol}  {pri.name}  approved={rec.trade_approved}")
+        get_batch_writer().add_row(SHEET_NAME, row, HEADERS)
+        logger.info(f"Options_Analysis ← {rec.symbol} (batched)")
     except Exception as exc:
-        logger.error(f"Options_Analysis write failed ({rec.symbol}): {exc}")
-        # Do not re-raise – just log the error so the pipeline continues=== ./ai/__init__.py ===
+        logger.error(f"Options_Analysis add failed ({rec.symbol}): {exc}")=== ./ai/__init__.py ===
 === ./ai/scoring_engine.py ===
 """
 AI Trade Scoring Engine

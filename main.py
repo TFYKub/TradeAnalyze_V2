@@ -1,4 +1,4 @@
-# main.py – full file with parallel processing and batch flush
+# main.py – full file with Phase 5 monitoring integration
 import time
 import traceback
 import warnings
@@ -31,6 +31,12 @@ from utils.symbol_loader import load_symbols_with_type
 from config.thresholds import THRESHOLDS
 from persistence.trade_persistence import get_persistence
 from utils.batch_writer import get_batch_writer
+
+# NEW IMPORTS FOR PHASE 5
+from monitoring.health_server import start_health_server, update_health
+from monitoring.metrics import update_win_rate, update_portfolio_metrics
+from monitoring.watchdog import update_last_run
+from monitoring.daily_summary import send_daily_summary
 
 if USE_V3:
     from core.futures_orchestrator_v3 import FuturesOrchestrator_v3
@@ -249,6 +255,9 @@ def _process_symbol(item):
 
 
 def run_trading_engine() -> None:
+    # NEW: Start health server in background thread
+    health_thread = start_health_server(port=8080)
+
     _warn_transaction_costs()
     load_open_positions()
     validate()
@@ -260,6 +269,11 @@ def run_trading_engine() -> None:
 
     print(f"\n🚀 ===== TRADING ENGINE START =====")
     print(f"📊 Symbols: {len(symbol_list)}")
+    # NEW: Update health status
+    update_health(status="running", open_positions=len(load_open_positions()))
+
+    success = 0
+    fail = 0
 
     if USE_PARALLEL:
         print(f"⚡ Using parallel mode with {MAX_WORKERS} workers")
@@ -268,17 +282,43 @@ def run_trading_engine() -> None:
             for future in concurrent.futures.as_completed(futures):
                 try:
                     future.result()
+                    success += 1
                 except Exception as e:
                     logger.error(f"Parallel task failed: {e}")
+                    fail += 1
     else:
         print("⏺ Using sequential mode")
         for item in symbol_list:
-            _process_symbol(item)
+            try:
+                _process_symbol(item)
+                success += 1
+            except Exception as e:
+                logger.error(f"Sequential task failed: {e}")
+                fail += 1
+
+    # NEW: Update health with final counts
+    update_health(status="completed", symbols_processed=success, errors=fail)
+
+    # NEW: Compute and update portfolio metrics from tracker
+    from analytics.performance_attribution import TRACKER
+    attribution = TRACKER.compute_attribution()
+    if attribution:
+        update_portfolio_metrics(attribution.sharpe, attribution.max_drawdown)
+        update_win_rate(attribution.win_rate * 100)
 
     # Flush all batched Google Sheets writes
     get_batch_writer().flush()
     print("\n✅ All data flushed to Google Sheets.")
-    logger.info("Engine done — all writes flushed.")
+
+    # NEW: Update last run timestamp for watchdog
+    update_last_run()
+
+    # NEW: Send daily summary (only if end of trading day – adjust hour as needed)
+    now = datetime.now()
+    if now.hour >= 23:  # after 11 PM local time
+        send_daily_summary()
+
+    logger.info("Engine done — success=%d fail=%d", success, fail)
 
 
 if __name__ == "__main__":

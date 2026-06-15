@@ -12,6 +12,9 @@ from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, List
 from contextlib import contextmanager
 
+from monitoring.metrics import record_trade
+from analytics.performance_attribution import TRACKER, TradeRecord
+
 logger = logging.getLogger(__name__)
 
 DB_PATH = "trade_analyze.db"
@@ -223,6 +226,59 @@ class TradePersistence:
         with self._cursor() as cur:
             cur.execute("DELETE FROM active_trades")
         logger.warning("[persistence] Cleared all active trades")
+
+    def close_trade(self, trade_id: str, exit_price: float, exit_time: str) -> None:
+        """Close an active trade, move to history, and update performance tracker."""
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM active_trades WHERE trade_id = ?", (trade_id,))
+            row = cur.fetchone()
+            if not row:
+                logger.error("Cannot close unknown trade_id: %s", trade_id)
+                return
+
+            direction = row["direction"]
+            entry = row["entry_price"]
+            pnl_pct = (exit_price - entry) / entry * 100
+            if direction == "SHORT":
+                pnl_pct = -pnl_pct
+
+            # Record metric for Prometheus
+            record_trade(row["symbol"], direction, pnl_pct)
+
+            closed = ClosedTrade(
+                symbol=row["symbol"],
+                direction=direction,
+                entry_price=entry,
+                exit_price=exit_price,
+                exit_time=exit_time,
+                pnl_pct=pnl_pct,
+                trade_id=trade_id,
+                entry_snapshot=row["entry_snapshot"],
+            )
+            self.save_closed_trade(closed)
+            cur.execute("DELETE FROM active_trades WHERE trade_id = ?", (trade_id,))
+
+        # Update performance tracker (outside the cursor context but still inside the method)
+        snapshot = json.loads(row["entry_snapshot"])
+        rr = (exit_price - entry) / (entry - row["stop_loss"]) if direction == "LONG" else (entry - exit_price) / (row["stop_loss"] - entry)
+        record = TradeRecord(
+            symbol=row["symbol"],
+            direction=direction,
+            entry=entry,
+            exit=exit_price,
+            pnl_pct=pnl_pct,
+            trade_date=exit_time,
+            markov_score=snapshot.get("regime_conf", 50.0),
+            trend_score=snapshot.get("ai_score", 50.0),
+            options_score=snapshot.get("conviction_score", 50.0),
+            risk_score=snapshot.get("liquidity_regime", 50.0),
+            vol_score=snapshot.get("liquidity_regime", 50.0),
+            regime=snapshot.get("regime", ""),
+            ai_score=snapshot.get("ai_score", 0.0),
+            rr=rr,
+        )
+        TRACKER.add_trade(record)
+        logger.info("[persistence] Closed trade %s pnl=%.2f%%", trade_id, pnl_pct)
 
     def close(self):
         if hasattr(self._thread_local, "conn"):

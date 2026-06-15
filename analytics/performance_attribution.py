@@ -182,77 +182,24 @@ class PerformanceTracker:
 
 # ── Stats helpers ─────────────────────────────────────────────────────────────
 def _sharpe(r: np.ndarray) -> float:
-    if len(r) < 2 or r.std() == 0: return 0.0
+    if len(r) < 2 or r.std() == 0:
+        return 0.0
     return float((r.mean() - 0.05 / TRADING_DAYS) / r.std() * math.sqrt(TRADING_DAYS))
 
 
 def _sortino(r: np.ndarray) -> float:
     down = r[r < 0]
-    if len(down) < 2 or down.std() == 0: return 0.0
+    if len(down) < 2 or down.std() == 0:
+        return 0.0
     return float((r.mean() - 0.05 / TRADING_DAYS) / down.std() * math.sqrt(TRADING_DAYS))
 
 
 def _max_drawdown(r: np.ndarray) -> float:
-    eq  = np.cumprod(1 + r)
-    pk  = np.maximum.accumulate(eq)
-    dd  = (eq - pk) / pk
+    eq = np.cumprod(1 + r)
+    pk = np.maximum.accumulate(eq)
+    dd = (eq - pk) / pk
     return float(dd.min() * 100) if len(dd) > 0 else 0.0
 
 
 # Singleton tracker — import and use across sessions
 TRACKER = PerformanceTracker()
-
-    # ----- Closing trade (P&L update) -----
-    def close_trade(self, trade_id: str, exit_price: float, exit_time: str) -> None:
-        """Close an active trade, move to history, and update performance tracker."""
-        with self._cursor() as cur:
-            # Fetch active trade
-            cur.execute("SELECT * FROM active_trades WHERE trade_id = ?", (trade_id,))
-            row = cur.fetchone()
-            if not row:
-                logger.error("Cannot close unknown trade_id: %s", trade_id)
-                return
-            # Compute P&L
-            direction = row["direction"]
-            entry = row["entry_price"]
-            pnl_pct = (exit_price - entry) / entry * 100
-            if direction == "SHORT":
-                pnl_pct = -pnl_pct
-
-            # Insert into history
-            closed = ClosedTrade(
-                symbol=row["symbol"],
-                direction=direction,
-                entry_price=entry,
-                exit_price=exit_price,
-                exit_time=exit_time,
-                pnl_pct=pnl_pct,
-                trade_id=trade_id,
-                entry_snapshot=row["entry_snapshot"],
-            )
-            self.save_closed_trade(closed)
-
-            # Delete from active
-            cur.execute("DELETE FROM active_trades WHERE trade_id = ?", (trade_id,))
-
-        # Update performance tracker
-        from analytics.performance_attribution import TRACKER, TradeRecord
-        snapshot = json.loads(row["entry_snapshot"])
-        record = TradeRecord(
-            symbol=row["symbol"],
-            direction=direction,
-            entry=entry,
-            exit=exit_price,
-            pnl_pct=pnl_pct,
-            trade_date=exit_time,
-            markov_score=snapshot.get("regime_conf", 50.0),
-            trend_score=snapshot.get("ai_score", 50.0),
-            options_score=snapshot.get("conviction_score", 50.0),
-            risk_score=snapshot.get("liquidity_regime", 50.0),  # simplified
-            vol_score=snapshot.get("liquidity_regime", 50.0),
-            regime=snapshot.get("regime", ""),
-            ai_score=snapshot.get("ai_score", 0.0),
-            rr=(exit_price - entry) / (entry - row["stop_loss"]) if direction == "LONG" else (entry - exit_price) / (row["stop_loss"] - entry)
-        )
-        TRACKER.add_trade(record)
-        logger.info("[persistence] Closed trade %s pnl=%.2f%%", trade_id, pnl_pct)
