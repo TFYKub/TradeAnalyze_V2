@@ -27,6 +27,8 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+from config.thresholds import THRESHOLDS
+
 logger = logging.getLogger(__name__)
 
 TRADING_DAYS = 252
@@ -90,6 +92,7 @@ def _simulate_trades(
 ) -> tuple[list[float], int, float]:
     """
     Simple rule-based backtest: EMA crossover + ATR stop.
+    Includes configurable transaction costs.
 
     Returns (trade_returns, n_trades, profit_factor).
     Uses default signal if signal_fn is None.
@@ -110,6 +113,15 @@ def _simulate_trades(
     entry      = 0.0
     stop_loss  = 0.0
     direction  = ""
+
+    # Transaction cost assumption: 0.05% for stocks, 0.02% for crypto
+    # We assume a fixed round‑trip cost of 0.1% for this generic backtest.
+    # In a real integration, the asset type would be passed.
+    cost_pct = THRESHOLDS.COST_STOCK_PCT  # conservative
+    if THRESHOLDS.MODEL_TRANSACTION_COSTS:
+        cost_per_trade = cost_pct * 2  # entry + exit
+    else:
+        cost_per_trade = 0.0
 
     for i in range(26, len(close) - 1):
         if not in_trade:
@@ -137,6 +149,8 @@ def _simulate_trades(
                 ret = (exit_price - entry) / entry
                 if direction == "SHORT":
                     ret = -ret
+                # Subtract transaction costs
+                ret -= cost_per_trade
                 trade_returns.append(ret)
                 in_trade = False
 

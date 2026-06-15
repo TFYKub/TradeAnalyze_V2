@@ -34,6 +34,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from config.thresholds import THRESHOLDS
+
 logger = logging.getLogger(__name__)
 
 N_SIMULATIONS  = 10_000
@@ -106,7 +108,14 @@ def run_monte_carlo(
     final_prices = price_paths[:, -1]
 
     # ── Returns ───────────────────────────────────────────────────────────────
-    final_returns_pct = (final_prices - entry) / entry * 100
+    # Subtract transaction costs: assume round-trip cost = 0.1% for this generic MC
+    if THRESHOLDS.MODEL_TRANSACTION_COSTS:
+        # Use a conservative 0.05% each way (0.1% round-trip)
+        cost_pct = THRESHOLDS.COST_STOCK_PCT * 2
+    else:
+        cost_pct = 0.0
+
+    final_returns_pct = (final_prices - entry) / entry * 100 - cost_pct * 100
 
     # ── Probabilities ─────────────────────────────────────────────────────────
     prob_profit = 0.0
@@ -159,10 +168,10 @@ def run_monte_carlo(
 
     logger.info(
         "MC[%d paths, %dd, %s]  P(profit)=%.1f%%  P(SL)=%.1f%%  P(TP)=%.1f%%  "
-        "E[ret]=%.2f%%  VaR95=%.2f%%",
+        "E[ret]=%.2f%%  VaR95=%.2f%%  cost=%.3f%%",
         simulations, horizon, direction,
         prob_profit, prob_stop_hit, prob_target_hit,
-        expected_return, var_95,
+        expected_return, var_95, cost_pct * 100,
     )
 
     return MonteCarloResult(

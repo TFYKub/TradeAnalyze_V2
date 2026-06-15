@@ -46,5 +46,11 @@ class TradingThresholds:
     MIN_STRUCTURE_SCORE: float = 40.0
     MAX_STRUCTURE_CONFLICT_PENALTY: float = 30.0
 
+    # Transaction costs
+    COST_STOCK_PCT:          float = 0.0005   # 0.05% (commission + slippage)
+    COST_CRYPTO_PCT:         float = 0.0002   # 0.02% for crypto
+    SLIPPAGE_LIQUID_PCT:     float = 0.0001   # 0.01% for liquid assets
+    SLIPPAGE_ILLIQUID_PCT:   float = 0.0005   # 0.05% for illiquid
+    MODEL_TRANSACTION_COSTS: bool  = True     # global switch
 
 THRESHOLDS = TradingThresholds()

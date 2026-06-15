@@ -32,6 +32,7 @@ from reports.option_chain_writer import clear_symbol_rows, write_option_chain
 from reports.sheet_writer import log_trade_signals
 from reports.sheet_writer_v2 import write_all_institutional
 from utils.symbol_loader import load_symbols_with_type
+from config.thresholds import THRESHOLDS
 
 from config.config import USE_V3
 
@@ -50,8 +51,15 @@ MIN_CONVICTION_ALERT = 60.0
 # ---------- Helper: warn about zero transaction costs ----------
 def _warn_transaction_costs():
     """Log a warning if transaction costs are not being modelled."""
-    logger.warning("No transaction costs are modelled in simulations. "
-                   "For production, consider adding slippage and commission (e.g., 0.1% per trade).")
+    if THRESHOLDS.MODEL_TRANSACTION_COSTS:
+        logger.info(
+            "Transaction cost model ENABLED: stocks %.3f%% (round-trip), crypto %.3f%%",
+            THRESHOLDS.COST_STOCK_PCT * 200,
+            THRESHOLDS.COST_CRYPTO_PCT * 200,
+        )
+    else:
+        logger.warning("Transaction costs are DISABLED in config/thresholds.py. "
+                       "For realistic backtesting, set MODEL_TRANSACTION_COSTS=True.")
 
 # ---------- Helper to build trade signal dict ----------
 def _build_trade_signal_dict(symbol, futures, asset_type):
@@ -101,7 +109,7 @@ def _run_crypto_extras(symbol: str, price: float) -> str:
 
 # ---------- Main trading engine ----------
 def run_trading_engine() -> None:
-    # Warn about zero transaction costs (Task 0.5)
+    # Log transaction cost assumptions (Task 1.6)
     _warn_transaction_costs()
 
     validate()
@@ -250,13 +258,9 @@ def run_trading_engine() -> None:
 if __name__ == "__main__":
     try:
         # Set timezone to UTC for all datetime operations (Task 0.7)
-        # Note: This does not change system time, only ensures that if we call
-        # datetime.now() we get UTC. We also ensure `option_chain.py` already uses UTC.
-        # Explicitly set default timezone to UTC (Python 3.9+)
         import os
         os.environ["TZ"] = "UTC"
-        time.tzset()  # Only works on Unix, but fine for most deployments.
-        # Alternatively, we rely on datetime.now(timezone.utc) in critical places.
+        time.tzset()
         run_trading_engine()
     except Exception:
         logger.critical("GLOBAL ERROR:\n%s", traceback.format_exc())
