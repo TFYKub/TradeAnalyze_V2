@@ -1,18 +1,14 @@
-# main.py – full file (as in your codebase, verified)
-"""
-TradeAnalyze — Main Entry Point  (v2 — full institutional)
-=============================================================
-Uses FuturesOrchestrator_v2/v3 exclusively.
-All LINE messages go through line_alert_v2 (which exports send_line_message).
-"""
+# main.py – full file with parallel processing and batch flush
 import time
 import traceback
 import warnings
 from datetime import datetime, timezone
+import concurrent.futures
 
 warnings.filterwarnings("ignore")
 
 from config.config_validator import validate
+from config.config import USE_V3, USE_PARALLEL, MAX_WORKERS
 from config.logging_config import logger
 from alerts.line_alert_v2 import send_institutional_alert
 from alerts.notification_manager import send_notification
@@ -34,8 +30,7 @@ from reports.sheet_writer_v2 import write_all_institutional
 from utils.symbol_loader import load_symbols_with_type
 from config.thresholds import THRESHOLDS
 from persistence.trade_persistence import get_persistence
-
-from config.config import USE_V3
+from utils.batch_writer import get_batch_writer
 
 if USE_V3:
     from core.futures_orchestrator_v3 import FuturesOrchestrator_v3
@@ -49,9 +44,8 @@ else:
 
 MIN_CONVICTION_ALERT = 60.0
 
-# ---------- Helper: warn about zero transaction costs ----------
+
 def _warn_transaction_costs():
-    """Log a warning if transaction costs are not being modelled."""
     if THRESHOLDS.MODEL_TRANSACTION_COSTS:
         logger.info(
             "Transaction cost model ENABLED: stocks %.3f%% (round-trip), crypto %.3f%%",
@@ -62,9 +56,8 @@ def _warn_transaction_costs():
         logger.warning("Transaction costs are DISABLED in config/thresholds.py. "
                        "For realistic backtesting, set MODEL_TRANSACTION_COSTS=True.")
 
-# ---------- Helper: load open positions from database ----------
+
 def load_open_positions():
-    """Recover open positions from database and notify."""
     persistence = get_persistence()
     active = persistence.load_active_trades()
     if active:
@@ -72,14 +65,13 @@ def load_open_positions():
         for trade in active:
             logger.info("  %s %s entry=%.2f size=%.2f%%", trade.symbol, trade.direction,
                         trade.entry_price, trade.position_size)
-            # Optionally send a recovery alert
             send_notification(f"[RECOVERY] Open position: {trade.symbol} {trade.direction} "
                               f"entry={trade.entry_price:.2f} risk={trade.position_size:.1f}%")
     else:
         logger.info("No open positions found in database.")
     return active
 
-# ---------- Helper to build trade signal dict ----------
+
 def _build_trade_signal_dict(symbol, futures, asset_type):
     return {
         "symbol": symbol, "regime": futures.regime, "price": futures.price,
@@ -97,7 +89,7 @@ def _build_trade_signal_dict(symbol, futures, asset_type):
         "avg_gamma": None, "fast_decay_pct": None, "asset_type": asset_type,
     }
 
-# ---------- Crypto extras ----------
+
 def _run_crypto_extras(symbol: str, price: float) -> str:
     lines = ["", "━"*28, "🔐 CRYPTO INSTITUTIONAL DATA", "━"*28]
     try:
@@ -125,18 +117,141 @@ def _run_crypto_extras(symbol: str, price: float) -> str:
 
     return "\n".join(lines)
 
-# ---------- Main trading engine ----------
+
+def _process_symbol(item):
+    """Process a single symbol – extracted from original loop."""
+    symbol = item["symbol"]
+    asset_type = item["asset_type"]
+    print(f"\n{'━'*44}")
+    print(f"📊 {symbol}  ({asset_type})")
+
+    persistence = get_persistence()
+    if persistence.has_active_trade(symbol):
+        print(f"  ⏸️  Skipping {symbol} – active trade already exists (reconciliation)")
+        logger.info("[%s] Skipped due to existing active trade", symbol)
+        return
+
+    try:
+        df = get_market_data(symbol)
+        if df is None or df.empty:
+            print(f"  ❌ No market data")
+            return
+
+        price = float(df["Close"].iloc[-1])
+        print(f"  ⚙️  Futures analysis...")
+        orchestrator = OrchestratorClass(win_rate=0.52, avg_rr=2.5)
+        futures = orchestrator.run(symbol, df)
+
+        dec_e = {"LONG":"🟢","SHORT":"🔴","NO_TRADE":"⏸️"}.get(futures.final_decision,"❓")
+        print(f"  {dec_e} {futures.final_decision}  "
+              f"Regime={futures.regime}({futures.regime_conf:.0f}%)  "
+              f"Grade={futures.trade_grade}  AI={futures.ai_score:.0f}  "
+              f"RR={futures.rr:.2f}  MC={futures.mc_profit_prob:.0f}%")
+
+        sig_dict = _build_trade_signal_dict(symbol, futures, asset_type)
+        log_trade_signals(symbol, [sig_dict], [{"bull":0,"bear":0,"sideway":0}])
+        write_all_institutional(
+            symbol=symbol, price=price, result_v2=futures,
+            liquidity=getattr(futures, 'liquidity_result', None),
+            flow=getattr(futures, 'flow_result', None),
+            breadth=getattr(futures, 'breadth_result', None),
+            persistence=getattr(futures, 'persistence_result', None),
+            forecast=getattr(futures, 'forecast_result', None),
+            conviction=getattr(futures, 'conviction_result', None),
+            cross_asset=getattr(futures, 'cross_asset_result', None),
+        )
+
+        print(f"  ⚙️  Option chain...")
+        enriched_chain = []
+        opts_rec = None
+        try:
+            raw_chain = fetch_option_chain(symbol, price, asset_type=asset_type)
+            enriched_chain = enrich_with_greeks(raw_chain, spot=price)
+            if enriched_chain:
+                clear_symbol_rows(symbol)
+                n = write_option_chain(symbol, enriched_chain)
+                print(f"  📋 Option_Chain: {n} rows ✅")
+                df_ind = compute_ema(compute_rsi(compute_atr(df.copy())))
+                chain_iv = next((float(r["iv"]) for r in enriched_chain
+                                 if r.get("option_type") == "call" and r.get("iv", 0) > 0), None)
+                iv_rank_result = compute_iv_rank(df_ind, current_iv=chain_iv)
+                iv_surface = compute_vol_surface(enriched_chain)
+                print(f"  📐 IV Rank={iv_rank_result.iv_rank:.0f}  {iv_rank_result.signal}  "
+                      f"Skew={iv_surface.skew_signal}")
+            else:
+                print(f"  ⚠️  Option chain: no data")
+        except Exception as exc:
+            logger.warning("[%s] Option chain: %s", symbol, exc)
+            print(f"  ⚠️  Option chain: {exc}")
+
+        print(f"  ⚙️  Options analysis...")
+        try:
+            regime_engine = MarkovRegimeEngine()
+            df_ind = compute_ema(compute_rsi(compute_atr(df.copy())))
+            try:
+                reg_result = regime_engine.detect(df_ind)
+                regime_probs = reg_result.regime_probs_all
+            except Exception:
+                regime_probs = {futures.regime: 0.65}
+
+            opts_rec = run_options_analysis(
+                symbol=symbol, price=price, df=df_ind,
+                regime=futures.regime, regime_conf=futures.regime_conf,
+                regime_probs=regime_probs, ai_score=futures.ai_score,
+                enriched_chain=enriched_chain,
+            )
+            write_options_analysis(opts_rec)
+            print(f"  📊 Options: {opts_rec.primary.name}  "
+                  f"score={opts_rec.primary.score:.0f}  "
+                  f"EV={opts_rec.primary.ev:.1f}  "
+                  f"POP={opts_rec.primary.pop:.0f}%  "
+                  f"{'✅' if opts_rec.trade_approved else '⏸️'}")
+        except Exception as exc:
+            logger.error("[%s] Options analysis: %s", symbol, exc)
+            print(f"  ⚠️  Options: {exc}")
+
+        if asset_type == "crypto":
+            try:
+                crypto_msg = _run_crypto_extras(symbol, price)
+                send_notification(crypto_msg)
+                print(f"  🔐 Crypto data sent")
+            except Exception as exc:
+                print(f"  ⚠️  Crypto extras: {exc}")
+
+        if USE_V3:
+            v3_state = getattr(futures, 'v3_state', None)
+            decision_report = report_builder(symbol, price, futures, v3_state, opts_rec)
+        else:
+            decision_report = futures.report_text
+
+        msg = decision_report[:4490] + "\n…" if len(decision_report) > 4500 else decision_report
+        send_notification(msg)
+        print(f"  📱 Unified execution report → Notification sent")
+
+        send_institutional_alert(
+            symbol=symbol, price=price, result_v2=futures,
+            liquidity=getattr(futures, 'liquidity_result', None),
+            flow=getattr(futures, 'flow_result', None),
+            breadth=getattr(futures, 'breadth_result', None),
+            persistence=getattr(futures, 'persistence_result', None),
+            forecast=getattr(futures, 'forecast_result', None),
+            conviction=getattr(futures, 'conviction_result', None),
+            cross_asset=getattr(futures, 'cross_asset_result', None),
+            min_conviction=MIN_CONVICTION_ALERT,
+        )
+
+        print(f"  ⏱  {futures.runtime:.1f}s")
+        time.sleep(1.5)
+
+    except Exception:
+        logger.error("[%s] UNHANDLED:\n%s", symbol, traceback.format_exc())
+        print(f"  ❌ ERROR:\n{traceback.format_exc()}")
+
+
 def run_trading_engine() -> None:
-    # Log transaction cost assumptions (Task 1.6)
     _warn_transaction_costs()
-
-    # Recover open positions (Task 2.4)
-    open_positions = load_open_positions()
-
+    load_open_positions()
     validate()
-    orchestrator = OrchestratorClass(win_rate=0.52, avg_rr=2.5)
-    regime_engine = MarkovRegimeEngine()
-    success = fail = 0
 
     symbol_list = load_symbols_with_type("LINE")
     if not symbol_list:
@@ -145,149 +260,29 @@ def run_trading_engine() -> None:
 
     print(f"\n🚀 ===== TRADING ENGINE START =====")
     print(f"📊 Symbols: {len(symbol_list)}")
-    if open_positions:
-        print(f"🔄 Recovered {len(open_positions)} open positions from database")
 
-    for item in symbol_list:
-        symbol = item["symbol"]
-        asset_type = item["asset_type"]
-        print(f"\n{'━'*44}")
-        print(f"📊 {symbol}  ({asset_type})")
-
-        # Skip if symbol already has an open position (prevent duplicate)
-        persistence = get_persistence()
-        if persistence.has_active_trade(symbol):
-            print(f"  ⏸️  Skipping {symbol} – active trade already exists (reconciliation)")
-            logger.info("[%s] Skipped due to existing active trade", symbol)
-            continue
-
-        try:
-            df = get_market_data(symbol)
-            if df is None or df.empty:
-                print(f"  ❌ No market data"); fail += 1; continue
-
-            price = float(df["Close"].iloc[-1])
-            print(f"  ⚙️  Futures analysis...")
-            futures = orchestrator.run(symbol, df)
-
-            dec_e = {"LONG":"🟢","SHORT":"🔴","NO_TRADE":"⏸️"}.get(futures.final_decision,"❓")
-            print(f"  {dec_e} {futures.final_decision}  "
-                  f"Regime={futures.regime}({futures.regime_conf:.0f}%)  "
-                  f"Grade={futures.trade_grade}  AI={futures.ai_score:.0f}  "
-                  f"RR={futures.rr:.2f}  MC={futures.mc_profit_prob:.0f}%")
-
-            # Write sheets
-            sig_dict = _build_trade_signal_dict(symbol, futures, asset_type)
-            log_trade_signals(symbol, [sig_dict], [{"bull":0,"bear":0,"sideway":0}])
-            write_all_institutional(
-                symbol=symbol, price=price, result_v2=futures,
-                liquidity=getattr(futures, 'liquidity_result', None),
-                flow=getattr(futures, 'flow_result', None),
-                breadth=getattr(futures, 'breadth_result', None),
-                persistence=getattr(futures, 'persistence_result', None),
-                forecast=getattr(futures, 'forecast_result', None),
-                conviction=getattr(futures, 'conviction_result', None),
-                cross_asset=getattr(futures, 'cross_asset_result', None),
-            )
-
-            # Option Chain & Options Analysis
-            print(f"  ⚙️  Option chain...")
-            enriched_chain = []
-            opts_rec = None
-            try:
-                raw_chain = fetch_option_chain(symbol, price, asset_type=asset_type)
-                enriched_chain = enrich_with_greeks(raw_chain, spot=price)
-                if enriched_chain:
-                    clear_symbol_rows(symbol)
-                    n = write_option_chain(symbol, enriched_chain)
-                    print(f"  📋 Option_Chain: {n} rows ✅")
-                    df_ind = compute_ema(compute_rsi(compute_atr(df.copy())))
-                    chain_iv = next((float(r["iv"]) for r in enriched_chain
-                                     if r.get("option_type") == "call" and r.get("iv", 0) > 0), None)
-                    iv_rank_result = compute_iv_rank(df_ind, current_iv=chain_iv)
-                    iv_surface = compute_vol_surface(enriched_chain)
-                    print(f"  📐 IV Rank={iv_rank_result.iv_rank:.0f}  {iv_rank_result.signal}  "
-                          f"Skew={iv_surface.skew_signal}")
-                else:
-                    print(f"  ⚠️  Option chain: no data")
-            except Exception as exc:
-                logger.warning("[%s] Option chain: %s", symbol, exc)
-                print(f"  ⚠️  Option chain: {exc}")
-
-            print(f"  ⚙️  Options analysis...")
-            try:
-                df_ind = compute_ema(compute_rsi(compute_atr(df.copy())))
+    if USE_PARALLEL:
+        print(f"⚡ Using parallel mode with {MAX_WORKERS} workers")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [executor.submit(_process_symbol, item) for item in symbol_list]
+            for future in concurrent.futures.as_completed(futures):
                 try:
-                    reg_result = regime_engine.detect(df_ind)
-                    regime_probs = reg_result.regime_probs_all
-                except Exception:
-                    regime_probs = {futures.regime: 0.65}
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Parallel task failed: {e}")
+    else:
+        print("⏺ Using sequential mode")
+        for item in symbol_list:
+            _process_symbol(item)
 
-                opts_rec = run_options_analysis(
-                    symbol=symbol, price=price, df=df_ind,
-                    regime=futures.regime, regime_conf=futures.regime_conf,
-                    regime_probs=regime_probs, ai_score=futures.ai_score,
-                    enriched_chain=enriched_chain,
-                )
-                write_options_analysis(opts_rec)
-                print(f"  📊 Options: {opts_rec.primary.name}  "
-                      f"score={opts_rec.primary.score:.0f}  "
-                      f"EV={opts_rec.primary.ev:.1f}  "
-                      f"POP={opts_rec.primary.pop:.0f}%  "
-                      f"{'✅' if opts_rec.trade_approved else '⏸️'}")
-            except Exception as exc:
-                logger.error("[%s] Options analysis: %s", symbol, exc)
-                print(f"  ⚠️  Options: {exc}")
+    # Flush all batched Google Sheets writes
+    get_batch_writer().flush()
+    print("\n✅ All data flushed to Google Sheets.")
+    logger.info("Engine done — all writes flushed.")
 
-            # Crypto extras
-            if asset_type == "crypto":
-                try:
-                    crypto_msg = _run_crypto_extras(symbol, price)
-                    send_notification(crypto_msg)
-                    print(f"  🔐 Crypto data sent")
-                except Exception as exc:
-                    print(f"  ⚠️  Crypto extras: {exc}")
-
-            # Unified execution report (futures + options)
-            if USE_V3:
-                v3_state = getattr(futures, 'v3_state', None)
-                decision_report = report_builder(symbol, price, futures, v3_state, opts_rec)
-            else:
-                decision_report = futures.report_text
-
-            msg = decision_report[:4490] + "\n…" if len(decision_report) > 4500 else decision_report
-            send_notification(msg)
-            print(f"  📱 Unified execution report → Notification sent")
-
-            # Institutional alert
-            send_institutional_alert(
-                symbol=symbol, price=price, result_v2=futures,
-                liquidity=getattr(futures, 'liquidity_result', None),
-                flow=getattr(futures, 'flow_result', None),
-                breadth=getattr(futures, 'breadth_result', None),
-                persistence=getattr(futures, 'persistence_result', None),
-                forecast=getattr(futures, 'forecast_result', None),
-                conviction=getattr(futures, 'conviction_result', None),
-                cross_asset=getattr(futures, 'cross_asset_result', None),
-                min_conviction=MIN_CONVICTION_ALERT,
-            )
-
-            success += 1
-            print(f"  ⏱  {futures.runtime:.1f}s")
-            time.sleep(1.5)
-
-        except Exception:
-            fail += 1
-            logger.error("[%s] UNHANDLED:\n%s", symbol, traceback.format_exc())
-            print(f"  ❌ ERROR:\n{traceback.format_exc()}")
-
-    print(f"\n{'━'*44}")
-    print(f"🏁 DONE  ✅ {success}  ❌ {fail}")
-    logger.info("Engine done — success=%d fail=%d", success, fail)
 
 if __name__ == "__main__":
     try:
-        # Set timezone to UTC for all datetime operations
         import os
         os.environ["TZ"] = "UTC"
         time.tzset()

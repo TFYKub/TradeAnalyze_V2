@@ -1,11 +1,11 @@
-# reports/options_sheet_writer.py
-
+# reports/options_sheet_writer.py – Batched version
 import logging
 import math
 from datetime import datetime
 
 from config.config import SHEET_ID
 from utils.sheets_auth import get_sheets_client
+from utils.batch_writer import get_batch_writer
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ HEADERS = [
     "Approved", "AIScore",
 ]
 
+
 def _safe(v):
     if v is None:
         return ""
@@ -31,22 +32,20 @@ def _safe(v):
         return "" if (math.isnan(v) or math.isinf(v)) else round(v, 5)
     return v
 
+
 def _ensure_worksheet(ws_name: str):
-    """Get or create the worksheet. Returns worksheet object."""
     gc = get_sheets_client()
     sh = gc.open_by_key(SHEET_ID)
     try:
         ws = sh.worksheet(ws_name)
     except Exception:
-        # Worksheet does not exist – create it
         ws = sh.add_worksheet(title=ws_name, rows=5000, cols=len(HEADERS))
         logger.info(f"[options_sheet_writer] Created worksheet '{ws_name}'")
-        # Add headers
         ws.update('A1', [HEADERS], value_input_option='USER_ENTERED')
     return ws
 
+
 def _ensure_headers(ws):
-    """Insert header row if the sheet is empty or first row is not header."""
     try:
         first_row = ws.row_values(1)
         if not first_row or first_row[0] != HEADERS[0]:
@@ -55,11 +54,8 @@ def _ensure_headers(ws):
     except Exception as exc:
         logger.warning(f"[options_sheet_writer] Header check failed: {exc}")
 
+
 def write_options_analysis(rec) -> None:
-    """
-    Append one row to the Options_Analysis worksheet.
-    Creates the worksheet if it does not exist.
-    """
     pri = rec.primary
     vol = rec.vol
     em = rec.em
@@ -87,10 +83,7 @@ def write_options_analysis(rec) -> None:
     ]
 
     try:
-        ws = _ensure_worksheet(SHEET_NAME)
-        _ensure_headers(ws)
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        logger.info(f"Options_Analysis ← {rec.symbol}  {pri.name}  approved={rec.trade_approved}")
+        get_batch_writer().add_row(SHEET_NAME, row, HEADERS)
+        logger.info(f"Options_Analysis ← {rec.symbol} (batched)")
     except Exception as exc:
-        logger.error(f"Options_Analysis write failed ({rec.symbol}): {exc}")
-        # Do not re-raise – just log the error so the pipeline continues
+        logger.error(f"Options_Analysis add failed ({rec.symbol}): {exc}")

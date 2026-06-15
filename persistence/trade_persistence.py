@@ -1,20 +1,12 @@
 """
-Trade Persistence Layer – SQLite for Stateful Bot
-===================================================
-Provides crash recovery and position reconciliation.
-
-Schemas:
-  active_trades    – open positions with full state
-  trade_history    – closed trades for P&L tracking
-  engine_signals   – every signal for walk‑forward analysis
-
-All operations are idempotent and thread‑safe.
+Trade Persistence Layer – SQLite with thread‑local connections.
 """
 from __future__ import annotations
 
 import sqlite3
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, List
@@ -25,26 +17,23 @@ logger = logging.getLogger(__name__)
 DB_PATH = "trade_analyze.db"
 
 
-# ---------- Dataclasses for persistence ----------
 @dataclass
 class ActiveTrade:
-    """Open trade as stored in database."""
     symbol: str
-    direction: str          # LONG / SHORT
+    direction: str
     entry_price: float
     stop_loss: float
     tp1: float
     tp2: float
-    position_size: float    # in % of capital
-    entry_time: str         # ISO format
-    entry_snapshot: str     # JSON of key state (regime, confidence, etc.)
-    trade_id: str           # unique (symbol + entry_time)
+    position_size: float
+    entry_time: str
+    entry_snapshot: str
+    trade_id: str
     last_updated: str
 
 
 @dataclass
 class ClosedTrade:
-    """Completed trade for P&L tracking."""
     symbol: str
     direction: str
     entry_price: float
@@ -55,28 +44,24 @@ class ClosedTrade:
     entry_snapshot: str
 
 
-# ---------- Persistence Manager ----------
 class TradePersistence:
-    """Singleton managing all trade persistence operations."""
-
+    """Singleton with thread‑local SQLite connections."""
     _instance = None
+    _lock = threading.Lock()
+    _thread_local = threading.local()
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._init_db()
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._init_db()
         return cls._instance
 
     def _init_db(self):
-        """Create tables if they don't exist."""
-        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self._create_tables()
-
-    def _create_tables(self):
-        cursor = self.conn.cursor()
-
-        # Active trades
+        """Create tables if they don't exist (main thread only)."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS active_trades (
                 trade_id TEXT PRIMARY KEY,
@@ -94,7 +79,6 @@ class TradePersistence:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_active_symbol ON active_trades(symbol)")
 
-        # Trade history
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS trade_history (
                 trade_id TEXT PRIMARY KEY,
@@ -110,7 +94,6 @@ class TradePersistence:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_symbol ON trade_history(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_time ON trade_history(exit_time)")
 
-        # Engine signals (for walk‑forward)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS engine_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,23 +108,28 @@ class TradePersistence:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_engine ON engine_signals(engine, timestamp)")
 
-        self.conn.commit()
+        conn.commit()
+
+    def _get_conn(self):
+        if not hasattr(self._thread_local, "conn"):
+            self._thread_local.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            self._thread_local.conn.row_factory = sqlite3.Row
+        return self._thread_local.conn
 
     @contextmanager
     def _cursor(self):
-        cursor = self.conn.cursor()
+        conn = self._get_conn()
+        cursor = conn.cursor()
         try:
             yield cursor
-            self.conn.commit()
+            conn.commit()
         except Exception:
-            self.conn.rollback()
+            conn.rollback()
             raise
         finally:
             cursor.close()
 
-    # ----- Active Trades -----
     def save_active_trade(self, trade: ActiveTrade) -> None:
-        """Insert or replace an active trade."""
         with self._cursor() as cur:
             cur.execute("""
                 INSERT OR REPLACE INTO active_trades
@@ -156,13 +144,11 @@ class TradePersistence:
         logger.info("[persistence] Saved active trade %s", trade.trade_id)
 
     def delete_active_trade(self, trade_id: str) -> None:
-        """Remove a trade from active_trades (when closed)."""
         with self._cursor() as cur:
             cur.execute("DELETE FROM active_trades WHERE trade_id = ?", (trade_id,))
         logger.info("[persistence] Deleted active trade %s", trade_id)
 
     def load_active_trades(self) -> List[ActiveTrade]:
-        """Return all active trades as ActiveTrade objects."""
         with self._cursor() as cur:
             cur.execute("SELECT * FROM active_trades")
             rows = cur.fetchall()
@@ -184,14 +170,11 @@ class TradePersistence:
         return trades
 
     def has_active_trade(self, symbol: str) -> bool:
-        """Check if there is already an open trade for a symbol (reconciliation)."""
         with self._cursor() as cur:
             cur.execute("SELECT 1 FROM active_trades WHERE symbol = ? LIMIT 1", (symbol,))
             return cur.fetchone() is not None
 
-    # ----- Trade History -----
     def save_closed_trade(self, closed: ClosedTrade) -> None:
-        """Insert a closed trade into history."""
         with self._cursor() as cur:
             cur.execute("""
                 INSERT OR REPLACE INTO trade_history
@@ -205,7 +188,6 @@ class TradePersistence:
         logger.info("[persistence] Saved closed trade %s pnl=%.2f%%", closed.trade_id, closed.pnl_pct)
 
     def load_recent_history(self, limit: int = 100) -> List[ClosedTrade]:
-        """Return most recent closed trades."""
         with self._cursor() as cur:
             cur.execute("SELECT * FROM trade_history ORDER BY exit_time DESC LIMIT ?", (limit,))
             rows = cur.fetchall()
@@ -218,7 +200,6 @@ class TradePersistence:
             ) for r in rows
         ]
 
-    # ----- Engine Signals -----
     def insert_signal(self, timestamp: str, symbol: str, engine: str,
                       predicted_direction: str, confidence: float) -> None:
         with self._cursor() as cur:
@@ -238,19 +219,19 @@ class TradePersistence:
                 WHERE timestamp = ? AND symbol = ? AND engine = ?
             """, (actual_return, actual_dir, timestamp, symbol, engine))
 
-    # ----- Utility -----
     def clear_all_active_trades(self) -> None:
-        """Force clear (used for testing or emergency reset)."""
         with self._cursor() as cur:
             cur.execute("DELETE FROM active_trades")
         logger.warning("[persistence] Cleared all active trades")
 
     def close(self):
-        self.conn.close()
+        if hasattr(self._thread_local, "conn"):
+            self._thread_local.conn.close()
+            del self._thread_local.conn
 
 
-# Singleton instance
 _persistence = None
+
 
 def get_persistence() -> TradePersistence:
     global _persistence

@@ -1,29 +1,13 @@
 """
-Option Chain Sheet Writer
-==========================
-Writes enriched option-chain rows (with Greeks) to the
-"Option_Chain" worksheet in Google Sheets.
-
-Performance strategy
---------------------
-• clear_symbol_rows() → uses batch-delete with a single values fetch,
-  then reverses indices — no row-by-row API calls.
-• write_option_chain() → single append_rows() call per symbol.
-
-Sheet schema (26 columns)
---------------------------
-Timestamp | Symbol | Source | Expiry | DTE | DTE_Bucket | Type
-Strike | Bid | Ask | Mid | Last | IV | Volume | OI | ITM
-Delta | Gamma | Theta | Vega | Rho
-Moneyness | High_Gamma | Theta_Category | Vega_Category | Direction_Bias
+Option Chain Sheet Writer – Batched version
 """
-
 import logging
 import math
 from datetime import datetime
 
 from config.config import SHEET_ID
 from utils.sheets_auth import get_sheets_client
+from utils.batch_writer import get_batch_writer
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +23,10 @@ HEADERS = [
     "Theta_Category", "Vega_Category", "Direction_Bias",
 ]
 
-# Column B (index 1) = Symbol
 _SYMBOL_COL_IDX = 1
 
 
 def _safe(v):
-    """Convert to a Google-Sheets-safe scalar."""
     if v is None:
         return ""
     if isinstance(v, bool):
@@ -88,7 +70,6 @@ def _row_from(ts: str, symbol: str, r: dict) -> list:
 
 
 def _ensure_headers(ws) -> None:
-    """Write header row if the sheet is empty or header is missing."""
     try:
         first = ws.row_values(1)
         if not first or first[0] != "Timestamp":
@@ -99,56 +80,33 @@ def _ensure_headers(ws) -> None:
 
 
 def write_option_chain(symbol: str, enriched_rows: list[dict]) -> int:
-    """
-    Append enriched option rows to the Option_Chain sheet.
-
-    Returns the number of rows written.
-    """
-
     if not enriched_rows:
         logger.info(f"[option_chain_writer] {symbol}: no rows to write")
         return 0
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    gc = get_sheets_client()
-    ws = gc.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
-    _ensure_headers(ws)
-
-    batch = [_row_from(ts, symbol, r) for r in enriched_rows]
-
     try:
-        ws.append_rows(batch, value_input_option="USER_ENTERED")
-        logger.info(f"[option_chain_writer] {symbol}: wrote {len(batch)} rows")
-        return len(batch)
+        for r in enriched_rows:
+            row = _row_from(ts, symbol, r)
+            get_batch_writer().add_row(SHEET_NAME, row, HEADERS)
+        logger.info(f"[option_chain_writer] {symbol}: added {len(enriched_rows)} rows to batch")
+        return len(enriched_rows)
     except Exception as exc:
-        logger.error(f"[option_chain_writer] {symbol}: write failed — {exc}")
-        raise
+        logger.error(f"[option_chain_writer] {symbol}: add failed — {exc}")
+        return 0
 
 
 def clear_symbol_rows(symbol: str) -> int:
-    """
-    Delete all existing data rows for *symbol* in one batch operation.
-
-    Strategy
-    --------
-    1. Fetch all values in one API call.
-    2. Collect 1-indexed row numbers where column B == symbol (skip header).
-    3. Delete in reverse order (bottom-up) to keep row indices stable.
-
-    Returns number of rows deleted.
-    """
-
     gc = get_sheets_client()
     ws = gc.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
 
     try:
-        all_values = ws.get_all_values()   # single API call
+        all_values = ws.get_all_values()
     except Exception as exc:
         logger.warning(f"[option_chain_writer] clear: read failed — {exc}")
         return 0
 
-    # Skip header row (index 0), find matching rows (1-indexed for Sheets API)
     to_delete = [
         i + 1
         for i, row in enumerate(all_values)
@@ -160,7 +118,6 @@ def clear_symbol_rows(symbol: str) -> int:
     if not to_delete:
         return 0
 
-    # Delete bottom-up so row indices don't shift
     deleted = 0
     for row_idx in reversed(to_delete):
         try:
@@ -174,19 +131,6 @@ def clear_symbol_rows(symbol: str) -> int:
 
 
 def overwrite_all_symbols(all_enriched: dict[str, list[dict]]) -> int:
-    """
-    Full refresh: clear ALL data rows and rewrite every symbol in one session.
-
-    More efficient than clear_symbol_rows() per symbol when processing many
-    symbols at once — only one `get_all_values()` call total.
-
-    Parameters
-    ----------
-    all_enriched : {symbol: [enriched_rows]}
-
-    Returns total rows written.
-    """
-
     if not all_enriched:
         return 0
 
@@ -194,7 +138,6 @@ def overwrite_all_symbols(all_enriched: dict[str, list[dict]]) -> int:
     ws = gc.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
     _ensure_headers(ws)
 
-    # Clear all data below header in one call
     try:
         last_row = ws.row_count
         if last_row > 1:
