@@ -927,7 +927,7 @@ def compute_risk_budget(
         active_positions     = len(positions),
     )
 === ./main.py ===
-# main.py – full file with parallel processing and batch flush
+# main.py – full file with Phase 5 monitoring integration
 import time
 import traceback
 import warnings
@@ -960,6 +960,12 @@ from utils.symbol_loader import load_symbols_with_type
 from config.thresholds import THRESHOLDS
 from persistence.trade_persistence import get_persistence
 from utils.batch_writer import get_batch_writer
+
+# NEW IMPORTS FOR PHASE 5
+from monitoring.health_server import start_health_server, update_health
+from monitoring.metrics import update_win_rate, update_portfolio_metrics
+from monitoring.watchdog import update_last_run
+from monitoring.daily_summary import send_daily_summary
 
 if USE_V3:
     from core.futures_orchestrator_v3 import FuturesOrchestrator_v3
@@ -1178,6 +1184,9 @@ def _process_symbol(item):
 
 
 def run_trading_engine() -> None:
+    # NEW: Start health server in background thread
+    health_thread = start_health_server(port=8080)
+
     _warn_transaction_costs()
     load_open_positions()
     validate()
@@ -1189,6 +1198,11 @@ def run_trading_engine() -> None:
 
     print(f"\n🚀 ===== TRADING ENGINE START =====")
     print(f"📊 Symbols: {len(symbol_list)}")
+    # NEW: Update health status
+    update_health(status="running", open_positions=len(load_open_positions()))
+
+    success = 0
+    fail = 0
 
     if USE_PARALLEL:
         print(f"⚡ Using parallel mode with {MAX_WORKERS} workers")
@@ -1197,17 +1211,43 @@ def run_trading_engine() -> None:
             for future in concurrent.futures.as_completed(futures):
                 try:
                     future.result()
+                    success += 1
                 except Exception as e:
                     logger.error(f"Parallel task failed: {e}")
+                    fail += 1
     else:
         print("⏺ Using sequential mode")
         for item in symbol_list:
-            _process_symbol(item)
+            try:
+                _process_symbol(item)
+                success += 1
+            except Exception as e:
+                logger.error(f"Sequential task failed: {e}")
+                fail += 1
+
+    # NEW: Update health with final counts
+    update_health(status="completed", symbols_processed=success, errors=fail)
+
+    # NEW: Compute and update portfolio metrics from tracker
+    from analytics.performance_attribution import TRACKER
+    attribution = TRACKER.compute_attribution()
+    if attribution:
+        update_portfolio_metrics(attribution.sharpe, attribution.max_drawdown)
+        update_win_rate(attribution.win_rate * 100)
 
     # Flush all batched Google Sheets writes
     get_batch_writer().flush()
     print("\n✅ All data flushed to Google Sheets.")
-    logger.info("Engine done — all writes flushed.")
+
+    # NEW: Update last run timestamp for watchdog
+    update_last_run()
+
+    # NEW: Send daily summary (only if end of trading day – adjust hour as needed)
+    now = datetime.now()
+    if now.hour >= 23:  # after 11 PM local time
+        send_daily_summary()
+
+    logger.info("Engine done — success=%d fail=%d", success, fail)
 
 
 if __name__ == "__main__":
@@ -1232,6 +1272,9 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any, List
 from contextlib import contextmanager
+
+from monitoring.metrics import record_trade
+from analytics.performance_attribution import TRACKER, TradeRecord
 
 logger = logging.getLogger(__name__)
 
@@ -1444,6 +1487,59 @@ class TradePersistence:
         with self._cursor() as cur:
             cur.execute("DELETE FROM active_trades")
         logger.warning("[persistence] Cleared all active trades")
+
+    def close_trade(self, trade_id: str, exit_price: float, exit_time: str) -> None:
+        """Close an active trade, move to history, and update performance tracker."""
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM active_trades WHERE trade_id = ?", (trade_id,))
+            row = cur.fetchone()
+            if not row:
+                logger.error("Cannot close unknown trade_id: %s", trade_id)
+                return
+
+            direction = row["direction"]
+            entry = row["entry_price"]
+            pnl_pct = (exit_price - entry) / entry * 100
+            if direction == "SHORT":
+                pnl_pct = -pnl_pct
+
+            # Record metric for Prometheus
+            record_trade(row["symbol"], direction, pnl_pct)
+
+            closed = ClosedTrade(
+                symbol=row["symbol"],
+                direction=direction,
+                entry_price=entry,
+                exit_price=exit_price,
+                exit_time=exit_time,
+                pnl_pct=pnl_pct,
+                trade_id=trade_id,
+                entry_snapshot=row["entry_snapshot"],
+            )
+            self.save_closed_trade(closed)
+            cur.execute("DELETE FROM active_trades WHERE trade_id = ?", (trade_id,))
+
+        # Update performance tracker (outside the cursor context but still inside the method)
+        snapshot = json.loads(row["entry_snapshot"])
+        rr = (exit_price - entry) / (entry - row["stop_loss"]) if direction == "LONG" else (entry - exit_price) / (row["stop_loss"] - entry)
+        record = TradeRecord(
+            symbol=row["symbol"],
+            direction=direction,
+            entry=entry,
+            exit=exit_price,
+            pnl_pct=pnl_pct,
+            trade_date=exit_time,
+            markov_score=snapshot.get("regime_conf", 50.0),
+            trend_score=snapshot.get("ai_score", 50.0),
+            options_score=snapshot.get("conviction_score", 50.0),
+            risk_score=snapshot.get("liquidity_regime", 50.0),
+            vol_score=snapshot.get("liquidity_regime", 50.0),
+            regime=snapshot.get("regime", ""),
+            ai_score=snapshot.get("ai_score", 0.0),
+            rr=rr,
+        )
+        TRACKER.add_trade(record)
+        logger.info("[persistence] Closed trade %s pnl=%.2f%%", trade_id, pnl_pct)
 
     def close(self):
         if hasattr(self._thread_local, "conn"):
@@ -3123,32 +3219,60 @@ def validate():
 
     print("CONFIG VALIDATION PASSED")
 === ./config/logging_config.py ===
+# config/logging_config.py – with JSON structured logging and rotation
 import logging
+import logging.handlers
+import json
 import os
+import time
+from datetime import datetime
 
 LOG_DIR = "logs"
-
 os.makedirs(LOG_DIR, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format=(
-        "%(asctime)s | "
-        "%(levelname)s | "
-        "%(name)s | "
-        "%(message)s"
-    ),
-    handlers=[
-        logging.FileHandler(
-            f"{LOG_DIR}/trade_analyze.log",
-            encoding="utf-8"
-        ),
-        logging.StreamHandler()
-    ]
+# ── JSON Formatter ───────────────────────────────────────────────────────────
+class JSONFormatter(logging.Formatter):
+    """Custom JSON formatter for structured logging."""
+    def format(self, record):
+        log_entry = {
+            "timestamp": datetime.fromtimestamp(record.created).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno,
+        }
+        # Add exception info if present
+        if record.exc_info:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        # Add extra fields (if any)
+        if hasattr(record, "extra"):
+            log_entry.update(record.extra)
+        return json.dumps(log_entry)
+
+# ── Rotating File Handler (10 MB per file, keep 5 backups) ───────────────────
+file_handler = logging.handlers.RotatingFileHandler(
+    f"{LOG_DIR}/trade_analyze.log",
+    maxBytes=10_485_760,  # 10 MB
+    backupCount=5,
+    encoding="utf-8"
+)
+file_handler.setFormatter(JSONFormatter())
+
+# ── Console handler (still human-readable for debugging) ─────────────────────
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(
+    logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 )
 
-logger = logging.getLogger("TradeAnalyze")
-=== ./risk/stop_engine.py ===
+# ── Configure root logger ────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[file_handler, console_handler]
+)
+
+logger = logging.getLogger("TradeAnalyze")=== ./risk/stop_engine.py ===
 """
 Institutional Stop Loss Engine  (Phase 1, Fix 2)
 ==================================================
@@ -12863,80 +12987,27 @@ class PerformanceTracker:
 
 # ── Stats helpers ─────────────────────────────────────────────────────────────
 def _sharpe(r: np.ndarray) -> float:
-    if len(r) < 2 or r.std() == 0: return 0.0
+    if len(r) < 2 or r.std() == 0:
+        return 0.0
     return float((r.mean() - 0.05 / TRADING_DAYS) / r.std() * math.sqrt(TRADING_DAYS))
 
 
 def _sortino(r: np.ndarray) -> float:
     down = r[r < 0]
-    if len(down) < 2 or down.std() == 0: return 0.0
+    if len(down) < 2 or down.std() == 0:
+        return 0.0
     return float((r.mean() - 0.05 / TRADING_DAYS) / down.std() * math.sqrt(TRADING_DAYS))
 
 
 def _max_drawdown(r: np.ndarray) -> float:
-    eq  = np.cumprod(1 + r)
-    pk  = np.maximum.accumulate(eq)
-    dd  = (eq - pk) / pk
+    eq = np.cumprod(1 + r)
+    pk = np.maximum.accumulate(eq)
+    dd = (eq - pk) / pk
     return float(dd.min() * 100) if len(dd) > 0 else 0.0
 
 
 # Singleton tracker — import and use across sessions
-TRACKER = PerformanceTracker()
-
-    # ----- Closing trade (P&L update) -----
-    def close_trade(self, trade_id: str, exit_price: float, exit_time: str) -> None:
-        """Close an active trade, move to history, and update performance tracker."""
-        with self._cursor() as cur:
-            # Fetch active trade
-            cur.execute("SELECT * FROM active_trades WHERE trade_id = ?", (trade_id,))
-            row = cur.fetchone()
-            if not row:
-                logger.error("Cannot close unknown trade_id: %s", trade_id)
-                return
-            # Compute P&L
-            direction = row["direction"]
-            entry = row["entry_price"]
-            pnl_pct = (exit_price - entry) / entry * 100
-            if direction == "SHORT":
-                pnl_pct = -pnl_pct
-
-            # Insert into history
-            closed = ClosedTrade(
-                symbol=row["symbol"],
-                direction=direction,
-                entry_price=entry,
-                exit_price=exit_price,
-                exit_time=exit_time,
-                pnl_pct=pnl_pct,
-                trade_id=trade_id,
-                entry_snapshot=row["entry_snapshot"],
-            )
-            self.save_closed_trade(closed)
-
-            # Delete from active
-            cur.execute("DELETE FROM active_trades WHERE trade_id = ?", (trade_id,))
-
-        # Update performance tracker
-        from analytics.performance_attribution import TRACKER, TradeRecord
-        snapshot = json.loads(row["entry_snapshot"])
-        record = TradeRecord(
-            symbol=row["symbol"],
-            direction=direction,
-            entry=entry,
-            exit=exit_price,
-            pnl_pct=pnl_pct,
-            trade_date=exit_time,
-            markov_score=snapshot.get("regime_conf", 50.0),
-            trend_score=snapshot.get("ai_score", 50.0),
-            options_score=snapshot.get("conviction_score", 50.0),
-            risk_score=snapshot.get("liquidity_regime", 50.0),  # simplified
-            vol_score=snapshot.get("liquidity_regime", 50.0),
-            regime=snapshot.get("regime", ""),
-            ai_score=snapshot.get("ai_score", 0.0),
-            rr=(exit_price - entry) / (entry - row["stop_loss"]) if direction == "LONG" else (entry - exit_price) / (row["stop_loss"] - entry)
-        )
-        TRACKER.add_trade(record)
-        logger.info("[persistence] Closed trade %s pnl=%.2f%%", trade_id, pnl_pct)=== ./analytics/__init__.py ===
+TRACKER = PerformanceTracker()=== ./analytics/__init__.py ===
 
 === ./scripts/migrate_v2_to_v3.py ===
 """
@@ -12957,7 +13028,19 @@ def main():
     print("Migration complete. You can now set USE_V3=True in config.py")
 
 if __name__ == "__main__":
-    main()=== ./scripts/add_institutional_sheets.py ===
+    main()=== ./scripts/watchdog_check.py ===
+#!/usr/bin/env python
+"""
+Standalone watchdog check – to be called by cron every 15 minutes.
+"""
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from monitoring.watchdog import check_and_alert
+
+if __name__ == "__main__":
+    check_and_alert()=== ./scripts/add_institutional_sheets.py ===
 # scripts/add_institutional_sheets.py
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14624,7 +14707,395 @@ def compute_flow_engine(
         interpretation   = interp,
         component_detail = detail,
     )
-=== ./utils/retry.py ===
+=== ./monitoring/watchdog.py ===
+"""
+Watchdog – Phase 5.5
+=====================
+Monitors bot health via timestamp file. If the bot hasn't run in more than
+`STALL_THRESHOLD_SECONDS`, send an alert to Telegram/LINE.
+"""
+from __future__ import annotations
+
+import os
+import time
+import logging
+from datetime import datetime
+
+from alerts.notification_manager import send_notification
+
+logger = logging.getLogger(__name__)
+
+HEALTH_FILE = "logs/.last_run"
+STALL_THRESHOLD_SECONDS = 3600  # 1 hour – adjust as needed
+
+
+def update_last_run():
+    """Update the timestamp file after a successful run."""
+    try:
+        with open(HEALTH_FILE, "w") as f:
+            f.write(str(time.time()))
+        logger.info("[watchdog] Updated last run timestamp")
+    except Exception as e:
+        logger.error(f"[watchdog] Failed to write timestamp: {e}")
+
+
+def get_last_run() -> float:
+    """Read last run timestamp from file, or return 0 if file missing."""
+    try:
+        with open(HEALTH_FILE, "r") as f:
+            return float(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        return 0.0
+
+
+def check_and_alert() -> bool:
+    """
+    Check if bot has stalled. Returns True if healthy, False if stalled.
+    Sends an alert if stalled.
+    """
+    last_run = get_last_run()
+    if last_run == 0:
+        logger.info("[watchdog] No previous run found – assuming first run")
+        return True
+
+    elapsed = time.time() - last_run
+    if elapsed > STALL_THRESHOLD_SECONDS:
+        msg = (
+            f"🚨 BOT STALLED ALERT\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Last successful run: {datetime.fromtimestamp(last_run).isoformat()}\n"
+            f"Elapsed: {elapsed / 60:.1f} minutes\n"
+            f"Threshold: {STALL_THRESHOLD_SECONDS / 60:.0f} minutes\n"
+            f"Action: Check bot logs and restart if necessary."
+        )
+        send_notification(msg)
+        logger.warning(f"[watchdog] Bot stalled – elapsed {elapsed:.0f}s")
+        return False
+
+    logger.debug(f"[watchdog] Bot healthy – last run {elapsed:.0f}s ago")
+    return True
+
+
+# If called directly as a script, run the check
+if __name__ == "__main__":
+    # Configure basic logging for standalone execution
+    logging.basicConfig(level=logging.INFO)
+    check_and_alert()=== ./monitoring/daily_summary.py ===
+"""
+Daily Summary Report – Phase 5.4
+=================================
+Aggregates trade history from the last 24 hours and sends a summary to Telegram.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timedelta
+from typing import Optional
+
+from persistence.trade_persistence import get_persistence
+from analytics.performance_attribution import TRACKER, PerformanceAttributionResult
+from alerts.notification_manager import send_notification
+
+logger = logging.getLogger(__name__)
+
+
+def get_daily_summary() -> Optional[str]:
+    """
+    Generate a formatted summary of today's trading activity.
+    Returns None if no trades were closed today.
+    """
+    persistence = get_persistence()
+    # Load recent history (last 100 trades, then filter by date)
+    history = persistence.load_recent_history(limit=200)
+    now = datetime.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    today_trades = [
+        t for t in history
+        if datetime.fromisoformat(t.exit_time) >= today_start
+    ]
+
+    if not today_trades:
+        return None
+
+    total_pnl = sum(t.pnl_pct for t in today_trades)
+    wins = [t for t in today_trades if t.pnl_pct > 0]
+    losses = [t for t in today_trades if t.pnl_pct <= 0]
+    win_rate = len(wins) / len(today_trades) * 100 if today_trades else 0
+    avg_win = sum(t.pnl_pct for t in wins) / len(wins) if wins else 0
+    avg_loss = sum(t.pnl_pct for t in losses) / len(losses) if losses else 0
+    best = max(today_trades, key=lambda t: t.pnl_pct) if today_trades else None
+    worst = min(today_trades, key=lambda t: t.pnl_pct) if today_trades else None
+
+    # Compute overall performance metrics from tracker
+    attribution = TRACKER.compute_attribution()
+    sharpe = attribution.sharpe if attribution else 0.0
+    max_dd = attribution.max_drawdown if attribution else 0.0
+
+    summary = (
+        f"📊 DAILY TRADING SUMMARY – {now.strftime('%Y-%m-%d')}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Trades closed: {len(today_trades)}\n"
+        f"Total P&L: {total_pnl:+.2f}%\n"
+        f"Win rate: {win_rate:.1f}%\n"
+        f"Avg win: {avg_win:+.2f}% | Avg loss: {avg_loss:+.2f}%\n"
+        f"Best trade: {best.pnl_pct:+.2f}% ({best.symbol} {best.direction})\n"
+        f"Worst trade: {worst.pnl_pct:+.2f}% ({worst.symbol} {worst.direction})\n"
+        f"Portfolio Sharpe: {sharpe:.2f}\n"
+        f"Max drawdown: {max_dd:.1f}%\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    return summary
+
+
+def send_daily_summary():
+    """Generate and send the daily summary report if there were trades."""
+    summary = get_daily_summary()
+    if summary:
+        send_notification(summary)
+        logger.info("[daily_summary] Report sent")
+    else:
+        logger.info("[daily_summary] No trades today – skipping report")=== ./monitoring/__init__.py ===
+# monitoring/__init__.py
+"""Monitoring and observability module."""=== ./monitoring/metrics.py ===
+"""
+Prometheus Metrics Helper – Phase 5.3
+======================================
+Provides convenient functions to update metrics from anywhere in the code.
+All functions are safe even if prometheus_client is not installed.
+"""
+from __future__ import annotations
+
+import time
+from contextlib import contextmanager
+
+# Import from health_server – those functions already handle missing prometheus
+from monitoring.health_server import (
+    record_trade as _record_trade,
+    record_api_latency as _record_api_latency,
+    update_win_rate as _update_win_rate,
+    update_portfolio_metrics as _update_portfolio_metrics,
+)
+
+
+def record_trade(symbol: str, direction: str, pnl_pct: float):
+    """Record a closed trade for metrics."""
+    _record_trade(symbol, direction, pnl_pct)
+
+
+def update_win_rate(win_rate: float):
+    """Update rolling win rate gauge."""
+    _update_win_rate(win_rate)
+
+
+def update_portfolio_metrics(volatility: float, drawdown: float):
+    """Update portfolio volatility and drawdown gauges."""
+    _update_portfolio_metrics(volatility, drawdown)
+
+
+@contextmanager
+def measure_api_latency(endpoint: str):
+    """Context manager to measure API call latency."""
+    start = time.time()
+    yield
+    duration = time.time() - start
+    _record_api_latency(endpoint, duration)=== ./monitoring/health_server.py ===
+"""
+HTTP Health & Metrics Server – Phase 5.1 & 5.3
+================================================
+Provides /health and /metrics endpoints via Flask.
+Runs in a background daemon thread so it doesn't block main processing.
+
+If Flask or prometheus_client are not installed, the server will not start,
+but the bot will continue to run (metrics will be no-ops).
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from datetime import datetime
+from typing import Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
+
+# Try to import Flask and Prometheus; fallback to dummy implementations
+FLASK_AVAILABLE = False
+PROMETHEUS_AVAILABLE = False
+
+try:
+    import prometheus_client
+    from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    prometheus_client = None
+    logger.warning("prometheus_client not installed – metrics will be disabled")
+
+try:
+    from flask import Flask, Response, jsonify
+    FLASK_AVAILABLE = True
+except ImportError:
+    Flask = None
+    logger.warning("Flask not installed – health server will not start")
+
+# ── Prometheus Metrics (dummy if not available) ──────────────────────────────
+if PROMETHEUS_AVAILABLE:
+    TRADE_COUNT = Counter(
+        "tradeanalyze_trades_total",
+        "Total number of trades executed",
+        ["symbol", "direction", "result"]
+    )
+    WIN_RATE = Gauge("tradeanalyze_win_rate", "Rolling win rate over last 100 trades")
+    PORTFOLIO_DD = Gauge("tradeanalyze_max_drawdown_pct", "Current portfolio max drawdown %")
+    PORTFOLIO_VOL = Gauge("tradeanalyze_volatility_annual_pct", "Portfolio annualised volatility %")
+    API_LATENCY = Histogram(
+        "tradeanalyze_api_latency_seconds",
+        "Latency of external API calls",
+        ["endpoint"],
+        buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0)
+    )
+    BOT_STATUS = Gauge("tradeanalyze_bot_status", "Bot health status: 1 = running, 0 = stalled/crashed")
+    LAST_RUN_TIMESTAMP = Gauge("tradeanalyze_last_run_timestamp", "Unix timestamp of last successful run")
+    OPEN_TRADES = Gauge("tradeanalyze_open_trades", "Number of currently open positions")
+else:
+    # Dummy implementations (no-ops)
+    class _DummyCounter:
+        def labels(self, *args, **kwargs):
+            return self
+        def inc(self, *args, **kwargs):
+            pass
+    class _DummyGauge:
+        def set(self, *args, **kwargs):
+            pass
+    class _DummyHistogram:
+        def labels(self, *args, **kwargs):
+            return self
+        def observe(self, *args, **kwargs):
+            pass
+
+    TRADE_COUNT = _DummyCounter()
+    WIN_RATE = _DummyGauge()
+    PORTFOLIO_DD = _DummyGauge()
+    PORTFOLIO_VOL = _DummyGauge()
+    API_LATENCY = _DummyHistogram()
+    BOT_STATUS = _DummyGauge()
+    LAST_RUN_TIMESTAMP = _DummyGauge()
+    OPEN_TRADES = _DummyGauge()
+
+# ── Health data ───────────────────────────────────────────────────────────────
+_health_data = {
+    "last_run_timestamp": None,
+    "status": "starting",
+    "open_positions": 0,
+    "version": "2.0",
+    "symbols_processed": 0,
+    "errors": 0,
+}
+_health_lock = threading.Lock()
+
+
+def update_health(
+    status: str = None,
+    open_positions: int = None,
+    symbols_processed: int = None,
+    errors: int = None,
+):
+    """Update the health data (thread‑safe)."""
+    with _health_lock:
+        if status is not None:
+            _health_data["status"] = status
+            if PROMETHEUS_AVAILABLE:
+                BOT_STATUS.set(1 if status == "running" else 0)
+        if open_positions is not None:
+            _health_data["open_positions"] = open_positions
+            if PROMETHEUS_AVAILABLE:
+                OPEN_TRADES.set(open_positions)
+        if symbols_processed is not None:
+            _health_data["symbols_processed"] = symbols_processed
+        if errors is not None:
+            _health_data["errors"] = errors
+        if _health_data["last_run_timestamp"] is None:
+            _health_data["last_run_timestamp"] = time.time()
+            if PROMETHEUS_AVAILABLE:
+                LAST_RUN_TIMESTAMP.set(_health_data["last_run_timestamp"])
+
+
+def record_trade(symbol: str, direction: str, pnl_pct: float):
+    """Record a closed trade for metrics."""
+    if PROMETHEUS_AVAILABLE:
+        result = "win" if pnl_pct > 0 else "loss"
+        TRADE_COUNT.labels(symbol=symbol, direction=direction, result=result).inc()
+
+
+def record_api_latency(endpoint: str, duration: float):
+    """Record external API call latency."""
+    if PROMETHEUS_AVAILABLE:
+        API_LATENCY.labels(endpoint=endpoint).observe(duration)
+
+
+def update_win_rate(win_rate: float):
+    """Update the rolling win rate gauge."""
+    if PROMETHEUS_AVAILABLE:
+        WIN_RATE.set(win_rate)
+
+
+def update_portfolio_metrics(volatility: float, drawdown: float):
+    """Update portfolio volatility and drawdown gauges."""
+    if PROMETHEUS_AVAILABLE:
+        PORTFOLIO_VOL.set(volatility)
+        PORTFOLIO_DD.set(drawdown)
+
+
+def _create_flask_app():
+    """Create Flask app with health and metrics endpoints (only if Flask available)."""
+    if not FLASK_AVAILABLE:
+        return None
+    app = Flask(__name__)
+
+    @app.route("/health", methods=["GET"])
+    def health():
+        with _health_lock:
+            data = _health_data.copy()
+        data["timestamp"] = datetime.now().isoformat()
+        return jsonify(data)
+
+    @app.route("/metrics", methods=["GET"])
+    def metrics():
+        if PROMETHEUS_AVAILABLE:
+            return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+        else:
+            return "Prometheus client not installed", 503
+
+    @app.route("/ready", methods=["GET"])
+    def ready():
+        with _health_lock:
+            if _health_data["status"] == "running":
+                return "OK", 200
+            return "NOT READY", 503
+
+    return app
+
+
+def start_health_server(port: int = 8080) -> Optional[threading.Thread]:
+    """Start the health server in a background daemon thread, if Flask available."""
+    if not FLASK_AVAILABLE:
+        logger.info("Flask not installed – health server not started")
+        return None
+
+    app = _create_flask_app()
+    if app is None:
+        return None
+
+    from threading import Thread
+    server_thread = Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False),
+        daemon=True
+    )
+    server_thread.start()
+    logger.info(f"Health server started on port {port}")
+    return server_thread=== ./utils/retry.py ===
 import time
 
 

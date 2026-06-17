@@ -22,7 +22,7 @@ from regime.markov import MarkovRegimeEngine
 from indicators.ema import compute_ema
 from indicators.rsi import compute_rsi
 from indicators.atr import compute_atr
-from reports.options_formatter import format_options_message
+# from reports.options_formatter import format_options_message   # <-- REMOVE THIS LINE
 from reports.options_sheet_writer import write_options_analysis
 from reports.option_chain_writer import clear_symbol_rows, write_option_chain
 from reports.sheet_writer import log_trade_signals

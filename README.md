@@ -1,74 +1,71 @@
-TradeAnalyze V.3 – Institutional Trading Bot
-Futures + Options | Markov Regime | ML Forecast | Conviction Scoring | Portfolio Optimiser
+# TradeAnalyze V3.0
 
-TradeAnalyze V.3 is a fully automated trading system that analyses daily OHLCV data for stocks, ETFs and crypto assets, generates directional futures signals (LONG / SHORT / NO TRADE) and recommends option strategies using a multi‑engine institutional pipeline. All signals are logged to Google Sheets and sent to Telegram / LINE with hedge‑fund‑style reports.
+**Institutional‑grade trading system** combining futures signals, options analysis, portfolio optimisation, and risk management — designed for systematic trading of equities, crypto, and futures.
 
-🚀 Key Features
-Feature	Description
-Markov Regime Detection	Gaussian HMM with 5 states (STRONG_BULL … STRONG_BEAR)
-Ensemble Regime v2	7‑component: Markov, Trend, Volatility, Macro, Liquidity, Breadth, Cross‑Asset
-Liquidity Regime	DXY, VIX, Yields, TLT → RISK_ON / RISK_OFF / CRISIS / RECOVERY
-Market Breadth	Crypto (BTC.D, TOTAL3, SSR) + Equity (A/D, %>200dma, NH/NL)
-Derivatives Flow	Funding rate, Open Interest, Long/Short ratio, Liquidation clusters
-Conviction Engine	8‑signal weighted score → FULL / NORMAL / HALF / NO TRADE
-ML Forecast	XGBoost / LightGBM → 5d/10d/20d expected returns & probabilities
-Walk‑Forward Validation	Rolling OOS performance & adaptive ensemble weights (V3)
-Regime‑Switching Monte Carlo	GBM with regime‑dependent volatility (V3)
-Portfolio Optimiser	Risk Parity & Hierarchical Risk Parity (HRP)
-Option Strategy Selector	14 strategies – EV / POP / Kelly ranked, approved by AI score
-Advanced Greeks	Delta, Gamma, Vega, Theta, Vanna, Charm, Vomma, Veta, Speed
-LINE / Telegram Alerts	Institutional‑grade rate‑limited alerts with monthly quota detection
-Google Sheets Logging	TradeSignals, Options, Option_Chain, InstitutionalSignals, etc.
-📦 Quick Start
-Clone & install
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+---
+
+## Features
+
+- **Unified Signal Pipeline**  
+  Combines 19+ engines: Markov Regime, Market Structure, RSI Divergence, Bayesian Reliability, ML Forecast, Conviction Scoring, and more.
+
+- **Institutional Options Analysis**  
+  Full suite: chain fetching (yfinance + Deribit), Black‑Scholes Greeks, volatility surface, expected move, 14 strategies, EV/POP/Kelly ranking.
+
+- **Multi‑Asset Support**  
+  Equities, crypto (BTC, ETH, SOL, etc.), and futures‑like instruments.
+
+- **Portfolio Optimisation**  
+  Risk Parity and Hierarchical Risk Parity (HRP) for multi‑asset allocation; single‑asset mode provides volatility and drawdown estimates.
+
+- **Robust Monitoring**  
+  Health server (Flask), Prometheus metrics, watchdog (stall detection), daily summary reports.
+
+- **Production‑Ready**  
+  SQLite persistence, batching for Google Sheets, graceful fallbacks, retries, and LINE/Telegram alerts.
+
+---
+
+## Quick Start
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/yourusername/TradeAnalyze_V2.git
+cd TradeAnalyze_V2
+2. Set Up Environment
+Create a virtual environment (optional but recommended):
 
 bash
-git clone https://github.com/TFYKub/TradeAnalyze_V2.git
-cd TradeAnalyze_V2
-python -m venv venv_v2 && source venv_v2/bin/activate
+python -m venv venv
+source venv/bin/activate        # On Windows: venv\Scripts\activate
+3. Install Dependencies
+bash
 pip install -r requirements.txt
-Set environment variables (.env file or shell)
+4. Configure Environment Variables
+Create a .env file in the project root:
 
-ini
-LINE_TOKEN=your_line_token
+env
 SHEET_ID=your_google_sheet_id
-GOOGLE_CREDENTIALS='{"type":"service_account",...}'
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-Configure symbols in Google Sheet SYMBOL_CONFIG (columns: symbol, group, asset_type)
+GOOGLE_CREDENTIALS={"type": "service_account", ...}   # JSON string or path
+LINE_TOKEN=your_line_notify_token
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token   # optional
+TELEGRAM_CHAT_ID=your_telegram_chat_id       # optional
+5. Set Up Google Sheets
+Create a Google Sheet and share it with your service account email.
 
-Enable V3 in config/config.py
+Add a worksheet named SYMBOL_CONFIG with columns: symbol, group, asset_type.
 
-python
-USE_V3 = True
-Run
+Fill with your symbols (e.g., AAPL, BTC-USD, ETH-USD), group LINE, and stock or crypto.
 
+6. Run the System
 bash
 python main.py
-📊 Outputs
-Telegram / LINE – executive decision, trade plan, option strategy, Monte Carlo, institutional dashboards.
+The system will start processing symbols, generate signals, and send notifications.
 
-Google Sheets – TradeSignals, Options, Option_Chain, InstitutionalSignals, RegimeDashboard, FlowSnapshot.
-
-🧪 V3 New Phases (optional, toggle in config.py)
-Phase	Description
-1	Walk‑forward validation + adaptive ensemble
-2	Quantile forecast (LightGBM, 5/10/20d)
-3	Regime‑switching Monte Carlo
-4	Portfolio optimiser (risk parity, min var, max Sharpe, Kelly)
-5	Crypto flow V2 (OI delta, funding momentum, liquidations, whale flow)
-6	Dealer Greeks (gamma exposure, vanna, charm, pin‑risk)
-7	Stress testing (2008, Covid, 2022, vol shock, liquidity crisis)
-🔧 Configuration
-All thresholds (MIN_RR, MIN_AI_SCORE, MAX_REGIME_CONFIDENCE, etc.) are centralised in config/thresholds.py.
-Notification channels: Telegram primary, LINE fallback (automatic monthly quota detection).
-
-🤝 Contributing
-Run tests before submitting PRs:
-
-bash
-pytest tests/
-📄 License
-Proprietary – all rights reserved.
-
-Built with yfinance, hmmlearn, xgboost, lightgbm, scipy, gspread.
+Configuration
+All thresholds are centralised in config/thresholds.py.
+Feature flags (V3 phases, parallel execution) are in config/config.py.
